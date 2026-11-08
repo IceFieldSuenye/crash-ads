@@ -129,13 +129,11 @@ fun AppRoot(vm: MainViewModel) {
                         running = running,
                         serviceEnabled = serviceEnabled,
                         batteryIgnored = batteryIgnored,
-                        overlayGranted = overlayGranted,
                         paused = paused,
                         onOpenAccessibility = vm::openAccessibilitySettings,
                         onTogglePause = vm::setPaused,
                         onRequestBattery = vm::requestBatteryWhitelist,
                         onOpenOem = vm::openOemBackgroundSettings,
-                        onRequestOverlay = vm::requestOverlayPermission,
                     )
 
                     TAB_RULES -> RulesScreen(

@@ -373,33 +373,10 @@ class AdSkipService : AccessibilityService() {
 
         val strongContext = AdDetector.hasStrongAdContext(tree.nodes)
 
-        // The "ask before quitting" card stays on screen while the ad is
-        // scanned as usual. If the user closes the ad themselves, the card must
-        // disappear with it instead of lingering on the home screen.
-        if (interactivePrompt != null) {
-            val stillAd = interactivePromptPkg == pkg && AdDetector.isInteractiveAd(tree.nodes)
-            val expired = SystemClock.elapsedRealtime() - interactivePromptAt > 15_000L
-            if (!stillAd || expired) {
-                dismissInteractivePrompt()
-            }
-            return
-        }
-
         // 0a) Interactive ads ("上滑浏览 获取奖励", "跳转浏览 15 秒领奖") only
-        //     advance when the user swipes, so they are abandoned. Every new
-        //     ad asks once through a floating card; the answer is remembered
-        //     for that specific ad instead of for the whole app.
+        //     advance when the user swipes, so they are quit outright: no
+        //     prompt, no waiting.
         if (AdDetector.isInteractiveAd(tree.nodes)) {
-            val signature = AdDetector.interactiveSignature(tree.nodes)
-            if (signature != null && signature == interactiveSkippedSignature) {
-                quitInteractiveAd(pkg, tree, width, height, confirmed = true)
-                return
-            }
-            if (signature != null && signature == interactiveDeclinedSignature) return
-            if (signature != null && OverlayUtils.canDrawOverlays(this)) {
-                showInteractivePrompt(pkg, signature)
-                return
-            }
             quitInteractiveAd(pkg, tree, width, height, confirmed = false)
             return
         }

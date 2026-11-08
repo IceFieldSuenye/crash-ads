@@ -20,8 +20,12 @@ data class AppSettings(
     val enabled: Boolean = true,
     /** Only skip the splash / interstitial shown right after an app launches. */
     val splashOnly: Boolean = false,
-    /** Skip full-screen WebView ads (H5 landing pages). */
-    val skipFullscreenWebAds: Boolean = true,
+
+    /**
+     * Skip full-screen WebView ads. Off by default: most rewarded videos are
+     * full-screen H5 pages, so "keep" is the safer default.
+     */
+    val skipFullscreenWebAds: Boolean = false,
     val matchCountdown: Boolean = true,
     val matchViewId: Boolean = true,
     val matchContentDescription: Boolean = true,

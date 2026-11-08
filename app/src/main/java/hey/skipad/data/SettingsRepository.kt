@@ -85,7 +85,7 @@ object SettingsRepository {
     private fun Preferences.toSettings(): AppSettings = AppSettings(
         enabled = this[Keys.enabled] ?: true,
         splashOnly = this[Keys.splashOnly] ?: false,
-        skipFullscreenWebAds = this[Keys.skipFullscreenWebAds] ?: true,
+        skipFullscreenWebAds = this[Keys.skipFullscreenWebAds] ?: false,
         matchCountdown = this[Keys.countdown] ?: true,
         matchViewId = this[Keys.viewId] ?: true,
         matchContentDescription = this[Keys.contentDescription] ?: true,
