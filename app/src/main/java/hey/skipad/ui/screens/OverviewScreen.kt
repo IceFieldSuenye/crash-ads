@@ -1,5 +1,6 @@
 package hey.skipad.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -55,11 +56,13 @@ fun OverviewScreen(
     running: Boolean,
     serviceEnabled: Boolean,
     batteryIgnored: Boolean,
+    overlayGranted: Boolean,
     paused: Boolean,
     onOpenAccessibility: () -> Unit,
     onTogglePause: (Boolean) -> Unit,
     onRequestBattery: () -> Unit,
     onOpenOem: () -> Unit,
+    onRequestOverlay: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -84,6 +87,10 @@ fun OverviewScreen(
                     )
                 }
             }
+        }
+
+        if (serviceEnabled && running && !overlayGranted) {
+            item { OverlayTipCard(onOpen = onRequestOverlay) }
         }
 
         item {
@@ -268,6 +275,35 @@ private fun SetupBanner(
             Spacer(Modifier.height(12.dp))
             Button(onClick = onOpen) {
                 Text(stringResource(R.string.open_settings))
+            }
+        }
+    }
+}
+
+@Composable
+private fun OverlayTipCard(onOpen: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = OceanBlue.copy(alpha = 0.10f),
+        border = BorderStroke(1.dp, OceanBlue.copy(alpha = 0.35f)),
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                text = "开启悬浮窗，奖励保护更稳",
+                style = MaterialTheme.typography.titleMedium,
+                color = OceanBlue,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "开启后，激励广告播放时会先弹出小窗询问「跳过还是继续看」，" +
+                    "误关广告也能一键撤回；互动广告连续出现时同样会在小窗提醒，不必再手动翻找。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            FilledTonalButton(onClick = onOpen) {
+                Text("去开启悬浮窗")
             }
         }
     }

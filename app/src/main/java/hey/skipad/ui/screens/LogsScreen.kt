@@ -45,6 +45,7 @@ import java.util.Locale
 fun LogsScreen(
     logs: List<SkipLogEntry>,
     onClear: () -> Unit,
+    onDisableKeyword: (String) -> Unit,
 ) {
     var selected by remember { mutableStateOf<SkipLogEntry?>(null) }
 
@@ -100,12 +101,20 @@ fun LogsScreen(
     }
 
     selected?.let { entry ->
-        LogDetailDialog(entry = entry, onDismiss = { selected = null })
+        LogDetailDialog(
+            entry = entry,
+            onDismiss = { selected = null },
+            onDisableKeyword = onDisableKeyword,
+        )
     }
 }
 
 @Composable
-private fun LogDetailDialog(entry: SkipLogEntry, onDismiss: () -> Unit) {
+private fun LogDetailDialog(
+    entry: SkipLogEntry,
+    onDismiss: () -> Unit,
+    onDisableKeyword: (String) -> Unit,
+) {
     val context = LocalContext.current
     val appName = remember(entry.packageName) { appLabel(context, entry.packageName) }
     Dialog(onDismissRequest = onDismiss) {
@@ -125,6 +134,20 @@ private fun LogDetailDialog(entry: SkipLogEntry, onDismiss: () -> Unit) {
                 DetailLine("包名", entry.packageName)
                 DetailLine("命中", entry.label)
                 DetailLine("规则", entry.rule)
+                val word = entry.label.trim()
+                if (word.isNotEmpty() && word.length <= 12 && word != "未命名控件") {
+                    TextButton(
+                        onClick = {
+                            onDisableKeyword(word)
+                            onDismiss()
+                        },
+                    ) {
+                        Text(
+                            text = "不再匹配「$word」",
+                            color = SunsetOrange,
+                        )
+                    }
+                }
                 DetailLine(
                     "结果",
                     when (entry.outcome) {

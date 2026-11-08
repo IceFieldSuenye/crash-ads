@@ -44,6 +44,14 @@ class AdSkipService : AccessibilityService() {
     @Volatile
     private var settings = AppSettings()
 
+    /** Effective skip labels, rebuilt whenever settings change. */
+    @Volatile
+    private var activeKeywords: Set<String> = AdDetector.defaultSkipWords
+
+    /** Class name of the current top activity (from window-state events). */
+    @Volatile
+    private var currentActivityClass: String = ""
+
     @Volatile
     private var todayCount = 0
 
@@ -84,6 +92,23 @@ class AdSkipService : AccessibilityService() {
     private val ruleTapHistory = HashMap<String, MutableList<Long>>()
     private var lastRuleBlockAt = 0L
     private var lastGuardLogAt = 0L
+
+    /** Interactive ads (swipe / shake / open a shop) are backed out of. */
+    private var interactiveQuitAttempts = 0
+    private var interactiveQuitWindowStart = 0L
+    private var lastInteractiveQuitAt = 0L
+    private var interactiveAdHits = 0
+    private var interactivePrompt: InteractivePrompt? = null
+    private var interactivePromptPkg: String? = null
+    private var interactivePromptAt = 0L
+
+    /** Answers are remembered per ad sheet, not per app. */
+    private var interactiveSkippedSignature: String? = null
+    private var interactiveDeclinedSignature: String? = null
+
+    /** Exit-confirmation taps are limited so a stuck dialog cannot loop. */
+    private var exitConfirmTaps = 0
+    private var lastExitConfirmAt = 0L
 
     /** Package currently showing a rewarded video (reward protection active). */
     private var rewardContextPkg: String? = null
@@ -133,6 +158,8 @@ class AdSkipService : AccessibilityService() {
             serviceScope.launch {
                 SettingsRepository.settings.collect { latest ->
                     settings = latest
+                    activeKeywords = (AdDetector.defaultSkipWords - latest.disabledKeywords) +
+                        latest.customKeywords
                     if (_running.value) {
                         if (latest.showRunningNotification) {
                             NotificationHelper.notifyRunning(this@AdSkipService)
@@ -179,6 +206,7 @@ class AdSkipService : AccessibilityService() {
             handler.removeCallbacks(ocrPollRunnable)
             launchWindowUntil = 0
             dismissRewardBall()
+            dismissInteractivePrompt()
             rewardWaitPackage = null
             rewardContextPkg = null
         }
@@ -189,6 +217,7 @@ class AdSkipService : AccessibilityService() {
         instance = null
         _running.value = false
         rewardContextPkg = null
+        dismissInteractivePrompt()
         NotificationHelper.cancelRunning(this)
         return super.onUnbind(intent)
     }
@@ -210,6 +239,10 @@ class AdSkipService : AccessibilityService() {
 
         pendingPackage = pkg
         val isWindowChange = source.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        if (isWindowChange) {
+            val className = source.className?.toString().orEmpty()
+            if (className.isNotEmpty()) currentActivityClass = className
+        }
         if (pkg != lastForegroundPackage) {
             // A new app came to the foreground: run control-tree detection and
             // OCR in parallel for the first 6 seconds.
@@ -235,6 +268,7 @@ class AdSkipService : AccessibilityService() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         dismissRewardBall()
+        dismissInteractivePrompt()
         runCatching { ocr.close() }
         NotificationHelper.cancelRunning(this)
         serviceScope.cancel()
@@ -326,75 +360,54 @@ class AdSkipService : AccessibilityService() {
 
         val (width, height) = screenSize()
 
-        val strongContext = AdDetector.hasStrongAdContext(tree.nodes)
-        val promise = AdDetector.rewardPromise(tree.nodes)
-        val unskippable = AdDetector.isUnskippableVideo(tree.nodes)
-        if (promise || unskippable || rewardWaitPackage == pkg) {
-            if (rewardContextPkg != pkg) {
-                rewardPopupTapCount = 0
-                rewardPopupTapAt = 0L
-            }
-            rewardContextPkg = pkg
-        }
-        val inRewardContext = rewardContextPkg == pkg
+        // "仅开屏跳过": only the short window right after an app comes forward.
+        if (settings.splashOnly && SystemClock.elapsedRealtime() > launchWindowUntil) return
 
-        // 0) "暂未获得奖励 / 继续观看": an early close already cost the reward and
-        //    the SDK offers a way back. Restore the countdown before anything
-        //    else runs, then stop: falling through to the close heuristics is
-        //    exactly what produced the close → miss → resume loop.
-        val miss = AdDetector.findRewardMissResume(tree.nodes)
-        if (miss != null) {
-            val missNode = tree.refs.getOrNull(miss.nodeIndex)
-            val missAt = SystemClock.elapsedRealtime()
-            if (missNode != null && missAt - lastContinueAt > 2_000L &&
-                performSkip(missNode) != SkipOutcome.FAILED
-            ) {
-                lastContinueAt = missAt
-                lastClickAt = missAt
-                forceQuitUntil = 0L
-                rewardContextPkg = pkg
-                rewardWaitPackage = pkg
-                rewardWaitSince = missAt
-                LogStore.add(pkg, miss.label, "继续观看·恢复奖励", SkipOutcome.CLICKED)
+        // Full-screen H5 ads can be excluded: some apps open their own WebView
+        // content and skipping it would close real pages.
+        if (!settings.skipFullscreenWebAds &&
+            AdDetector.isFullscreenWebAd(tree.nodes, width, height)
+        ) {
+            return
+        }
+
+        val strongContext = AdDetector.hasStrongAdContext(tree.nodes)
+
+        // The "ask before quitting" card stays on screen while the ad is
+        // scanned as usual. If the user closes the ad themselves, the card must
+        // disappear with it instead of lingering on the home screen.
+        if (interactivePrompt != null) {
+            val stillAd = interactivePromptPkg == pkg && AdDetector.isInteractiveAd(tree.nodes)
+            val expired = SystemClock.elapsedRealtime() - interactivePromptAt > 15_000L
+            if (!stillAd || expired) {
+                dismissInteractivePrompt()
             }
             return
         }
 
-        // 0b) "是否放弃提前领奖？" confirmation: it appears right after 继续看视频
-        //    is tapped, and 确认放弃 is what actually resumes playback.
-        val abandon = AdDetector.findEarlyRewardAbandon(tree.nodes)
-        if (abandon != null) {
-            val abandonNode = tree.refs.getOrNull(abandon.nodeIndex)
-            if (abandonNode != null && performSkip(abandonNode) != SkipOutcome.FAILED) {
-                lastClickAt = SystemClock.elapsedRealtime()
-                forceQuitUntil = 0L
-                LogStore.add(pkg, abandon.label, "放弃提前领奖·继续视频", SkipOutcome.CLICKED)
+        // 0a) Interactive ads ("上滑浏览 获取奖励", "跳转浏览 15 秒领奖") only
+        //     advance when the user swipes, so they are abandoned. Every new
+        //     ad asks once through a floating card; the answer is remembered
+        //     for that specific ad instead of for the whole app.
+        if (AdDetector.isInteractiveAd(tree.nodes)) {
+            val signature = AdDetector.interactiveSignature(tree.nodes)
+            if (signature != null && signature == interactiveSkippedSignature) {
+                quitInteractiveAd(pkg, tree, width, height, confirmed = true)
                 return
             }
+            if (signature != null && signature == interactiveDeclinedSignature) return
+            if (signature != null && OverlayUtils.canDrawOverlays(this)) {
+                showInteractivePrompt(pkg, signature)
+                return
+            }
+            quitInteractiveAd(pkg, tree, width, height, confirmed = false)
+            return
         }
 
-        // 1) Promo sheet on top of a rewarded video. Two flavours:
-        //    a) it offers "继续看视频" → tap that, playback resumes and the
-        //       reward still lands;
-        //    b) it only offers a forced detour ("browse 10s / play a game")
-        //       with no way back → abandon the ad (跳过, else back out).
+        // 0) Promo sheets that demand a browse / download detour ("去浏览 15 秒",
+        //    "去下载 加速 领奖") are abandoned outright: the reward is never
+        //    worth performing tasks for.
         if (AdDetector.isForcedBrowseAd(tree.nodes)) {
-            // The sheet usually offers a way back. Tap it first: it resumes the
-            // video and the reward still lands. Only when there is no way back
-            // do we fall through to abandoning the ad.
-            val resume = AdDetector.findContinueWatching(tree.nodes, height)
-            if (resume != null) {
-                clickContinueWatching(tree, resume, pkg, "继续观看")
-                return
-            }
-            // A rewarded video is playing underneath: backing out forfeits the
-            // reward ("暂未获得奖励"). Stay on the ad and let it finish; the
-            // bare "继续观看" link it draws later is handled further down.
-            if (promise) {
-                logGuardOnce(pkg, "强制浏览广告", "奖励保护·不退出")
-                return
-            }
-
             val forcedAt = SystemClock.elapsedRealtime()
             if (forcedAt - forceQuitWindowStart > 30_000L) {
                 forceQuitWindowStart = forcedAt
@@ -407,11 +420,10 @@ class AdSkipService : AccessibilityService() {
             lastForceQuitAt = forcedAt
 
             forceQuitUntil = forcedAt + 8000L
-            rewardWaitPackage = null
-            rewardContextPkg = null
             dismissRewardBall()
 
             val skip = AdDetector.findSkipButton(tree.nodes)
+                ?: AdDetector.findAnyCornerClose(tree.nodes, width, height)
             val skipNode = skip?.let { tree.refs.getOrNull(it.nodeIndex) }
             if (skipNode != null && performSkip(skipNode) != SkipOutcome.FAILED) {
                 lastClickAt = SystemClock.elapsedRealtime()
@@ -431,8 +443,16 @@ class AdSkipService : AccessibilityService() {
         // While backing out, answer the confirmation with "确定退出" and never
         // with 继续观看 (that would undo the exit).
         if (SystemClock.elapsedRealtime() < forceQuitUntil) {
+            // The ad is already gone (usually we landed back on the app's own
+            // home screen): stop backing out, otherwise the home page keeps
+            // receiving BACK every second.
+            if (!strongContext && AdDetector.findExitConfirm(tree.nodes) == null) {
+                forceQuitUntil = 0L
+                forceQuitAttempts = 0
+                return
+            }
             val confirm = AdDetector.findExitConfirm(tree.nodes)
-            if (confirm != null) {
+            if (confirm != null && canTapExitConfirm()) {
                 val node = tree.refs.getOrNull(confirm.nodeIndex)
                 if (node != null && performSkip(node) != SkipOutcome.FAILED) {
                     lastClickAt = SystemClock.elapsedRealtime()
@@ -442,53 +462,18 @@ class AdSkipService : AccessibilityService() {
                 }
             }
             val quitAt = SystemClock.elapsedRealtime()
-            if (forceQuitAttempts < 4 && quitAt - lastForceQuitAt > 1000L) {
+            if (forceQuitAttempts < 3 && quitAt - lastForceQuitAt > 1200L) {
                 lastForceQuitAt = quitAt
                 forceQuitAttempts++
                 performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            } else {
+                forceQuitUntil = 0L
+                forceQuitAttempts = 0
             }
             return
         }
 
-        // 1) "关闭广告后将无法获得奖励" sheet: answer with 继续观看, never close.
-        val exit = AdDetector.findRewardExit(tree.nodes)
-        if (exit != null) {
-            val resume = exit.resume
-            if (resume != null) {
-                val node = tree.refs.getOrNull(resume.nodeIndex)
-                if (node != null && performSkip(node) != SkipOutcome.FAILED) {
-                    lastClickAt = SystemClock.elapsedRealtime()
-                    LogStore.add(pkg, "继续观看", "撤回退出", SkipOutcome.CLICKED)
-                    showRewardBall(pkg)
-                    return
-                }
-            }
-            // No safe button to tap: back off rather than closing the ad.
-            suppressClickUntil = SystemClock.elapsedRealtime() + REWARD_EXIT_COOLDOWN_MS
-            LogStore.add(
-                pkg,
-                exit.message.ifBlank { "奖励确认弹窗" },
-                "已暂停点击以保护奖励",
-                SkipOutcome.BLOCKED,
-            )
-            return
-        }
-
-        // 2) Popups that interrupt a rewarded video: close them (× / 关闭 /
-        //    稍后 / 我知道了) so playback resumes and the reward still lands.
-        if (inRewardContext) {
-            val popup = AdDetector.findInterruptPopup(tree.nodes, width, height)
-            if (popup != null && canDismissRewardPopup()) {
-                val node = tree.refs.getOrNull(popup.nodeIndex)
-                if (node != null && performSkip(node) != SkipOutcome.FAILED) {
-                    lastClickAt = SystemClock.elapsedRealtime()
-                    LogStore.add(pkg, popup.label, "奖励弹窗·关闭", SkipOutcome.CLICKED)
-                    return
-                }
-            }
-        }
-
-        // 3) Mute the video ad via its speaker icon (rewarded videos too).
+        // 1) Mute the video ad via its speaker icon.
         if (settings.autoMuteVolume) {
             val volume = AdDetector.findVolumeButton(tree.nodes, width, height, strongContext)
             if (volume != null && canTapVolume(pkg)) {
@@ -501,25 +486,6 @@ class AdSkipService : AccessibilityService() {
             }
         }
 
-        // 4) A rewarded video that is still playing cannot be skipped: tapping
-        //    any close affordance here would forfeit the reward.
-        if (unskippable) return
-
-        // 4b) A rewarded video that lost or paused its reward draws a bare
-        //     "继续观看" link outside the sheet. It is not part of the miss
-        //     dialog, so without this pass it would never be tapped and the ad
-        //     would sit there until the user did it by hand.
-        if (inRewardContext || promise) {
-            val resume = AdDetector.findContinueWatching(tree.nodes, height)
-            if (resume != null) {
-                clickContinueWatching(tree, resume, pkg, "继续观看·恢复播放")
-                return
-            }
-        }
-
-        // 5) Reward gate: hold the skip while the reward is still pending.
-        if (rewardGate(pkg, tree.nodes)) return
-
         val config = DetectorConfig(
             matchCountdown = settings.matchCountdown,
             matchViewId = settings.matchViewId,
@@ -528,21 +494,18 @@ class AdSkipService : AccessibilityService() {
             aggressive = settings.aggressive,
         )
 
-        val suppressClose = inRewardContext
-        val hit = findSkip(tree, pkg, width, height, config, suppressClose)
-            ?: if (suppressClose) null else scanPopupClose(pkg, width, height, config)
+        val hit = findSkip(tree, pkg, width, height, config, false, false)
+            ?: scanPopupClose(pkg, width, height, config)
         traceDetection(pkg, tree.nodes, hit?.second)
 
         // Feed ads (e.g. QQ Zone): the "关闭此条广告" sheet is already open.
-        if (!suppressClose) {
-            val closeThis = AdDetector.findCloseThisAd(tree.nodes)
-            if (closeThis != null) {
-                forceSkipOnce = false
-                launchWindowUntil = 0
-                handler.removeCallbacks(ocrPollRunnable)
-                clickCandidate(tree, closeThis, pkg)
-                return
-            }
+        val closeThis = AdDetector.findCloseThisAd(tree.nodes)
+        if (closeThis != null) {
+            forceSkipOnce = false
+            launchWindowUntil = 0
+            handler.removeCallbacks(ocrPollRunnable)
+            clickCandidate(tree, closeThis, pkg)
+            return
         }
 
         if (hit != null) {
@@ -554,7 +517,7 @@ class AdSkipService : AccessibilityService() {
         }
 
         // Two-step feed ad: tap the small "广告" pill to open the close sheet.
-        if (settings.tapAdLabel && !suppressClose) {
+        if (settings.tapAdLabel) {
             val adLabel = AdDetector.findAdLabel(tree.nodes, width, height)
             if (adLabel != null && canTapAdLabel(pkg)) {
                 clickCandidate(tree, adLabel, pkg)
@@ -562,9 +525,9 @@ class AdSkipService : AccessibilityService() {
             }
         }
 
-        if (!suppressClose && maybeSwipeFeed(pkg, tree)) return
+        if (maybeSwipeFeed(pkg, tree)) return
 
-        if (!suppressClose && SystemClock.elapsedRealtime() < launchWindowUntil) {
+        if (SystemClock.elapsedRealtime() < launchWindowUntil) {
             maybeOcrTap(pkg)
         }
     }
@@ -634,6 +597,15 @@ class AdSkipService : AccessibilityService() {
         // rewarded video would otherwise be tapped and the reward lost.
         if (rewardWaitPackage == pkg || rewardContextPkg == pkg) return
         if (SystemClock.elapsedRealtime() - lastClickAt < settings.cooldownMs) return
+        // Only OCR inside a window that already looks like an ad. On an app's
+        // own home page the model happily "reads" 跳过 in banners and the
+        // resulting tap looked like a random click.
+        val context = activeTree(pkg) ?: return
+        if (!AdDetector.hasStrongAdContext(context.nodes) &&
+            !AdDetector.hasAdLabel(context.nodes)
+        ) {
+            return
+        }
         runCatching {
             ocr.scan { rect ->
                 runCatching {
@@ -714,7 +686,13 @@ class AdSkipService : AccessibilityService() {
         }
 
         val promise = AdDetector.rewardPromise(nodes)
-        if (!promise || settings.rewardMode == RewardMode.IMMEDIATE) return false
+        // Ads that never mention a reward still turn out to be rewarded videos
+        // ("再看 7s 可领取奖励" only shows up after a skip). Once the exit sheet
+        // proved it, stay in protection mode for this ad.
+        val resumed = rewardContextPkg == pkg &&
+            rewardWaitPackage == pkg &&
+            SystemClock.elapsedRealtime() - rewardWaitSince < 120_000L
+        if ((!promise && !resumed) || settings.rewardMode == RewardMode.IMMEDIATE) return false
 
         if (rewardWaitPackage != pkg) {
             rewardWaitPackage = pkg
@@ -771,6 +749,89 @@ class AdSkipService : AccessibilityService() {
         LogStore.add(pkg, label, rule, SkipOutcome.BLOCKED)
     }
 
+    /** At most two exit-confirmation taps in a 10 s window. */
+    private fun canTapExitConfirm(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastExitConfirmAt > 10_000L) exitConfirmTaps = 0
+        if (exitConfirmTaps >= 2) return false
+        if (now - lastExitConfirmAt < 1_200L) return false
+        exitConfirmTaps++
+        lastExitConfirmAt = now
+        return true
+    }
+
+    /**
+     * Quits an interactive ad. An explicit "跳过" label or a corner × is
+     * preferred over the back key: some SDKs swallow BACK, which is why the
+     * ad used to stay on screen after the user confirmed.
+     */
+    private fun quitInteractiveAd(
+        pkg: String,
+        tree: NodeTree,
+        width: Int,
+        height: Int,
+        confirmed: Boolean,
+    ) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastInteractiveQuitAt < 1_200L) return
+        if (now - interactiveQuitWindowStart > 20_000L) {
+            interactiveQuitWindowStart = now
+            interactiveQuitAttempts = 0
+        }
+        if (interactiveQuitAttempts >= 4) return
+        interactiveQuitAttempts++
+        interactiveAdHits++
+        lastInteractiveQuitAt = now
+        forceQuitUntil = now + 8_000L
+        forceQuitAttempts = 0
+        rewardWaitPackage = null
+        rewardContextPkg = null
+        dismissRewardBall()
+
+        val skip = AdDetector.findSkipButton(tree.nodes)
+            ?: AdDetector.findAnyCornerClose(tree.nodes, width, height)
+        val skipNode = skip?.let { tree.refs.getOrNull(it.nodeIndex) }
+        if (skipNode != null && performSkip(skipNode) != SkipOutcome.FAILED) {
+            logGuardOnce(pkg, "互动广告", if (confirmed) "已确认跳过" else "直接退出")
+            return
+        }
+
+        performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        logGuardOnce(pkg, "互动广告", if (confirmed) "已确认跳过" else "直接退出")
+    }
+
+    private fun showInteractivePrompt(pkg: String, signature: String) {
+        val prompt = InteractivePrompt(
+            context = this,
+            onSkip = {
+                interactiveSkippedSignature = signature
+                interactiveDeclinedSignature = null
+                interactivePrompt = null
+                interactivePromptPkg = null
+                handler.post(processRunnable)
+            },
+            onStay = {
+                interactiveDeclinedSignature = signature
+                interactivePrompt = null
+                interactivePromptPkg = null
+            },
+        )
+        if (prompt.show()) {
+            interactivePrompt = prompt
+            interactivePromptPkg = pkg
+            interactivePromptAt = SystemClock.elapsedRealtime()
+            LogStore.add(pkg, "互动广告", "询问是否跳过", SkipOutcome.BLOCKED)
+        } else {
+            quitInteractiveAd(pkg, activeTree(pkg) ?: return, 0, 0, confirmed = false)
+        }
+    }
+
+    private fun dismissInteractivePrompt() {
+        interactivePrompt?.dismiss()
+        interactivePrompt = null
+        interactivePromptPkg = null
+    }
+
     private fun activeTree(pkg: String): NodeTree? {
         val root = rootInActiveWindow ?: return null
         val rootPackage = root.packageName?.toString().orEmpty()
@@ -785,13 +846,21 @@ class AdSkipService : AccessibilityService() {
         height: Int,
         config: DetectorConfig,
         suppressCloseAd: Boolean,
+        rewardSettled: Boolean,
     ): Pair<NodeTree, SkipCandidate>? {
-        val primary = AdDetector.detect(tree.nodes, width, height, config, suppressCloseAd)
+        val adContextHint = AdDetector.isRewardActivity(currentActivityClass)
+        val primary = AdDetector.detect(
+            tree.nodes, width, height, config, suppressCloseAd, rewardSettled,
+            activeKeywords, adContextHint,
+        )
         if (primary != null) return tree to primary
 
         for (root in otherWindowRoots(pkg)) {
             val other = NodeExtractor.extract(root)
-            val candidate = AdDetector.detect(other.nodes, width, height, config, suppressCloseAd) ?: continue
+            val candidate = AdDetector.detect(
+                other.nodes, width, height, config, suppressCloseAd, rewardSettled,
+                activeKeywords, adContextHint,
+            ) ?: continue
             return other to candidate
         }
         return null
@@ -826,7 +895,7 @@ class AdSkipService : AccessibilityService() {
         val node = tree.refs.getOrNull(candidate.nodeIndex) ?: return false
         val now = SystemClock.elapsedRealtime()
         if (now - lastContinueAt < 2_000L) return false
-        if (performSkip(node) == SkipOutcome.FAILED) return false
+        if (performButtonTap(node) == SkipOutcome.FAILED) return false
         lastContinueAt = now
         lastClickAt = now
         forceQuitUntil = 0L
@@ -908,6 +977,35 @@ class AdSkipService : AccessibilityService() {
         val toast = Toast.makeText(applicationContext, "已跳过 · $rule", Toast.LENGTH_SHORT)
         toast.setGravity(Gravity.BOTTOM, 0, (resources.displayMetrics.density * 72).toInt())
         toast.show()
+    }
+
+    /**
+     * Taps a button inside a dialog. A node click is preferred, then a
+     * button-sized clickable ancestor (some SDKs attach the handler to the
+     * wrapper of the label instead of the label itself), and only then a
+     * coordinate tap.
+     */
+    private fun performButtonTap(node: AccessibilityNodeInfo): SkipOutcome {
+        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return SkipOutcome.CLICKED
+        }
+        val metrics = resources.displayMetrics
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < 3) {
+            val rect = Rect()
+            parent.getBoundsInScreen(rect)
+            val buttonSized = rect.width() in 1..(metrics.widthPixels * 85 / 100) &&
+                rect.height() in 1..(metrics.heightPixels * 22 / 100)
+            if (buttonSized && parent.isClickable &&
+                parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            ) {
+                return SkipOutcome.CLICKED
+            }
+            parent = parent.parent
+            depth++
+        }
+        return performSkip(node)
     }
 
     private fun performSkip(node: AccessibilityNodeInfo): SkipOutcome {
@@ -1057,6 +1155,9 @@ class AdSkipService : AccessibilityService() {
         /** Same rule / same package: at most [RULE_MAX_TAPS] taps per window. */
         private const val RULE_WINDOW_MS = 10_000L
         private const val RULE_MAX_TAPS = 4
+
+        /** After this many interactive ads the floating prompt asks once. */
+        private const val INTERACTIVE_PROMPT_AFTER = 1
 
         private const val REWARD_EXIT_COOLDOWN_MS = 5_000L
         private const val PROMPT_COOLDOWN_MS = 30_000L

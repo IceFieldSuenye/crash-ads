@@ -18,6 +18,10 @@ enum class RewardMode {
  */
 data class AppSettings(
     val enabled: Boolean = true,
+    /** Only skip the splash / interstitial shown right after an app launches. */
+    val splashOnly: Boolean = false,
+    /** Skip full-screen WebView ads (H5 landing pages). */
+    val skipFullscreenWebAds: Boolean = true,
     val matchCountdown: Boolean = true,
     val matchViewId: Boolean = true,
     val matchContentDescription: Boolean = true,
@@ -26,6 +30,10 @@ data class AppSettings(
     val showToast: Boolean = true,
     val cooldownMs: Int = 1200,
     val blacklist: Set<String> = emptySet(),
+    /** Extra skip labels typed by the user (matched exactly, trimmed). */
+    val customKeywords: Set<String> = emptySet(),
+    /** Built-in labels the user removed; never matched again. */
+    val disabledKeywords: Set<String> = emptySet(),
     val rewardMode: RewardMode = RewardMode.ASK,
     val closePopups: Boolean = true,
     val notifySkip: Boolean = true,

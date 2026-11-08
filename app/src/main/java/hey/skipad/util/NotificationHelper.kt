@@ -92,15 +92,15 @@ object NotificationHelper {
         )
         val actionLabel = if (paused) "开启拦截" else "暂停拦截"
         val text = if (paused) {
-            "已手动暂停，点击右下按钮开启拦截"
+            "已暂停拦截，点按下方按钮即可恢复"
         } else {
-            "正在守护广告拦截，点击右下按钮可临时暂停"
+            "正在拦截广告，点按下方按钮可临时暂停"
         }
         val notification = NotificationCompat.Builder(context, CHANNEL_ONGOING)
             .setSmallIcon(R.drawable.ic_stat_skip)
             .setContentTitle(if (paused) "闪退广告 已暂停" else "闪退广告 正在运行")
             .setContentText(text)
-            .setSubText(if (paused) "暂停中" else "守护中")
+            .setSubText(if (paused) "暂停中" else "拦截中")
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setSilent(true)

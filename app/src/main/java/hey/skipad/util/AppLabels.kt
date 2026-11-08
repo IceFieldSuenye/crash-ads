@@ -16,7 +16,13 @@ fun appLabel(context: Context, packageName: String): String {
     val label = runCatching {
         val manager = context.packageManager
         manager.getApplicationLabel(manager.getApplicationInfo(packageName, 0)).toString()
-    }.getOrNull()?.takeIf { it.isNotBlank() } ?: packageName
-    labelCache[packageName] = label
-    return label
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+    // Only successful lookups are cached: package visibility can change (app
+    // installed after the first log entry), and a cached fallback would keep
+    // showing the raw package name forever.
+    if (label != null) {
+        labelCache[packageName] = label
+        return label
+    }
+    return packageName
 }

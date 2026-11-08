@@ -41,7 +41,12 @@ object AdDetector {
     private const val MAX_ICON_SIZE_PX = 140
     private const val AD_LABEL_MAX_WIDTH_PX = 140
 
-    private val skipWords = setOf(
+    /**
+     * Built-in skip labels. Exposed so the rules screen can list them and the
+     * user can add or remove entries; the effective set is
+     * `defaultSkipWords - disabledKeywords + customKeywords`.
+     */
+    val defaultSkipWords: Set<String> = setOf(
         "跳过", "跳過", "略过", "略過",
         "跳过广告", "跳過廣告", "跳过此广告", "跳过所有广告",
         "跳过开屏广告", "跳過開屏廣告", "跳过开屏", "跳過開屏",
@@ -49,6 +54,8 @@ object AdDetector {
         "skip", "skipad", "skipads", "skip ad", "skip ads", "skip advertisement",
         "close ad", "closead", "close ads",
     )
+
+    private val skipWords: Set<String> get() = defaultSkipWords
 
     /** Texts that close the ad itself; forbidden while a reward is pending. */
     private val closeAdWords = listOf(
@@ -78,6 +85,9 @@ object AdDetector {
         "后可领奖", "后可獲得", "后可获得", "后可领取", "后可領取",
         "可立即领奖", "立即领奖", "即可領獎", "即可领奖", "提前领奖",
         "免看此广告", "免看廣告",
+        // "可提前21秒领奖" / "看29秒/下载应用加速领奖" style promises: the
+        // digits sit between the words, so the exact phrases above never match.
+        "领奖", "領獎", "可提前", "秒领奖", "加速领奖",
     )
 
     /**
@@ -92,9 +102,13 @@ object AdDetector {
         "任务未完成", "任務未完成", "未达领奖条件",
     )
 
-    /** Words that identify a "you are about to lose the reward" dialog. */
+    /**
+     * Words that identify a "you are about to lose the reward" dialog.
+     * "再看 7s" is the rewarded-video exit sheet even though the ad itself
+     * never mentions a reward.
+     */
     private val rewardExitPattern = Regex(
-        """(放弃|放棄|失去|无法获得|無法獲得|不能获得|拿不到|无法领取|無法領取|将无法|將無法|确定要?关闭|確認關閉|确认要?退出|退出广告)""",
+        """(放弃|放棄|失去|无法获得|無法獲得|不能获得|拿不到|无法领取|無法領取|将无法|將無法|确定要?关闭|確認關閉|确认要?退出|退出广告|离开|離開|没有奖励|沒有獎勵|无奖励|無獎勵|再看\d{1,3}|坚持退出|堅持退出)""",
     )
 
     private val rewardWords = listOf("奖励", "獎勵", "道具", "金币", "金幣", "红包", "紅包", "礼包")
@@ -110,11 +124,42 @@ object AdDetector {
     private val forcedBrowseWords = listOf(
         "减广告时长", "缩短广告", "提前领奖", "提前领取", "提前获得",
         "去浏览", "浏览10秒", "强制浏览", "浏览领奖", "浏览就领",
+        // "去下载 加速 领奖" / "点击下载，广告缩短至8秒" — same kind of detour,
+        // just worded as a download instead of a browse.
+        "去下载", "下载应用", "下载加速", "加速领奖", "去体验", "点击下载",
     )
 
+    /**
+     * "Interactive" ads that only pay out after the user swipes, shakes or
+     * leaves the app ("上滑浏览 获取奖励", "跳转浏览 15 秒领奖"). They are
+     * abandoned outright instead of being played along with.
+     */
+    private val interactiveAdPattern = Regex(
+        """(上滑浏览|滑动浏览|上滑查看|滑一滑|摇一摇|摇动手机|翻转手机|扭一扭|跳转浏览|浏览\d{1,3}秒|减少\d{1,3}秒|缩短至\d{1,3}秒|免看此广告)""",
+    )
+
+    /**
+     * Ad-SDK activities that host rewarded videos. The class name is a hint
+     * only: some SDKs reuse the same activity for rewarded and plain
+     * interstitials, so it raises the ad context instead of deciding "reward".
+     */
+    private val rewardActivityPattern = Regex(
+        """(reward|rewarded|rewardvideo|reward_video|激励)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** True when the current activity looks like a rewarded-video host. */
+    fun isRewardActivity(className: String): Boolean =
+        className.isNotBlank() && rewardActivityPattern.containsMatchIn(className)
+
+    /**
+     * "Leave" confirmations. "放弃奖励 / 确认放弃" is deliberately absent: those
+     * buttons forfeit the reward, and tapping them on a real rewarded video was
+     * indistinguishable from helping the user.
+     */
     private val exitConfirmWords = setOf(
         "确定", "确认", "退出", "确定退出", "确认退出", "狠心退出", "狠心离开",
-        "残忍离开", "放弃奖励", "放弃", "直接退出",
+        "残忍离开", "直接退出", "退出广告",
     )
 
     /** Safe ways to dismiss an interrupt popup without losing the reward. */
@@ -162,7 +207,11 @@ object AdDetector {
         """关闭(此|该|这)条?广告|屏蔽(此|该)广告|关闭广告""",
     )
 
-    private val resumeWords = listOf("继续观看", "继续播放", "继续欣赏", "继续看视频", "继续观看视频")
+    private val resumeWords = listOf(
+        "继续观看", "继续播放", "继续欣赏", "继续看视频", "继续观看视频",
+        // "现在离开没有奖励哦" sheets label the safe button 继续任务 instead.
+        "继续任务", "继续做任务", "继续完成", "继续浏览", "继续阅读",
+    )
 
     private val volumeWords = listOf("音量", "声音", "静音", "volume", "sound", "mute", "扩音")
 
@@ -192,6 +241,34 @@ object AdDetector {
         }
 
         if (!strongContext || screenWidth <= 0 || screenHeight <= 0) return null
+
+        // A text-less speaker glued to the left of the ad's own "关闭" label.
+        // This is the layout of the SDK behind the PVZ2 reward ads: the mute
+        // icon never carries text, a description or a recognisable view id.
+        val closeLabel = nodes.firstOrNull {
+            val text = normalize(it.text)
+            text == "关闭" || text == "關閉" || text == "close"
+        }
+        if (closeLabel != null) {
+            val closeBounds = closeLabel.bounds
+            for (node in nodes) {
+                if (!node.enabled) continue
+                if (node.text.isNotBlank() || node.contentDescription.isNotBlank()) continue
+                if (!node.className.contains("Image") && !node.className.contains("View")) continue
+                val b = node.bounds
+                if (b.width() <= 0 || b.height() <= 0) continue
+                if (b.width() > screenWidth * 0.12f) continue
+                if (b.height() > screenHeight * 0.10f) continue
+                if (b.right > closeBounds.left + 4) continue
+                if (b.right < closeBounds.left - screenWidth * 0.12f) continue
+                val overlap = minOf(b.bottom, closeBounds.bottom) - maxOf(b.top, closeBounds.top)
+                val shortest = minOf(b.height(), closeBounds.height())
+                if (shortest <= 0 || overlap < shortest / 2) continue
+                val clickable = node.clickable || ancestorClickable(nodes, node)
+                if (!clickable) continue
+                return SkipCandidate(node.index, 65, "音量图标·关闭左侧", "静音")
+            }
+        }
 
         // Icon-only speaker drawn in a corner of a full-screen video ad.
         // Domestic SDKs place it flush against the edge (top-right, bottom-left
@@ -234,7 +311,9 @@ object AdDetector {
         for (node in nodes) {
             val text = node.text.trim()
             if (text.isEmpty() || text.length > 60) continue
-            if (rewardWords.none { text.contains(it) }) continue
+            // "再看 7s 可领取" sometimes omits the word 奖励 entirely.
+            val mentionsReward = rewardWords.any { text.contains(it) } || text.contains("再看")
+            if (!mentionsReward) continue
             if (!rewardExitPattern.containsMatchIn(text)) continue
             message = text
             break
@@ -249,8 +328,8 @@ object AdDetector {
             val matched = resumeWords.any { text.contains(it) } ||
                 (text.length <= 8 && (text == "取消" || text == "暫不" || text == "暂不"))
             if (!matched) continue
-            val clickable = node.clickable || ancestorClickable(nodes, node)
-            if (!clickable) continue
+            // "坚持退出" is the opposite answer; never pick it here.
+            if (text.contains("坚持") || text.contains("堅持") || text.contains("退出")) continue
             resume = SkipCandidate(node.index, 100, "继续观看·撤回", node.text.trim().take(24))
             break
         }
@@ -374,10 +453,19 @@ object AdDetector {
         screenHeight: Int,
         config: DetectorConfig,
         suppressCloseAd: Boolean = false,
+        /**
+         * The reward already landed ("恭喜获得奖励"), so closing the ad is safe
+         * even when the H5 landing page exposes no ad marker at all.
+         */
+        rewardSettled: Boolean = false,
+        /** Effective skip labels: built-ins minus disabled, plus user's own. */
+        keywords: Set<String> = defaultSkipWords,
+        /** The hosting activity looks like a rewarded-video activity. */
+        adContextHint: Boolean = false,
     ): SkipCandidate? {
         if (nodes.isEmpty() || screenWidth <= 0 || screenHeight <= 0) return null
 
-        val strongContext = hasStrongAdContext(nodes)
+        val strongContext = hasStrongAdContext(nodes) || rewardSettled || adContextHint
 
         var best: SkipCandidate? = null
 
@@ -392,17 +480,22 @@ object AdDetector {
             // Never treat text fields as skip buttons.
             if (node.className.contains("EditText")) continue
 
+            val phraseEnabled = "跳过" in keywords
             val strongText = text.isNotBlank() && (
-                normalize(text) in skipWords ||
-                    (normalize(text).length <= 8 && skipPhrasePattern.containsMatchIn(normalize(text))) ||
-                    normalize(description) in skipWords
+                normalize(text) in keywords ||
+                    (phraseEnabled && normalize(text).length <= 8 &&
+                        skipPhrasePattern.containsMatchIn(normalize(text))) ||
+                    normalize(description) in keywords
                 )
             // Inside an ad window, some SDKs mark the skip button as
             // not-visible-to-user even though it is drawn; do not drop it.
             if (!node.visible && !strongText && !strongContext) continue
 
             val textHit = if (text.isNotBlank()) {
-                scoreText(text, node, screenWidth, screenHeight, config, strongContext, nodes, suppressCloseAd)
+                scoreText(
+                    text, node, screenWidth, screenHeight, config, strongContext, nodes,
+                    suppressCloseAd, keywords,
+                )
             } else {
                 null
             }
@@ -410,7 +503,7 @@ object AdDetector {
             val descriptionHit = if (config.matchContentDescription && description.isNotBlank() && textHit == null) {
                 scoreText(
                     description, node, screenWidth, screenHeight, config,
-                    strongContext, nodes, suppressCloseAd,
+                    strongContext, nodes, suppressCloseAd, keywords,
                 )?.let { Hit(it.score - 4, it.rule + "·描述", it.label) }
             } else {
                 null
@@ -457,6 +550,8 @@ object AdDetector {
      * mention "看广告得时长" no longer qualify.
      */
     fun rewardPromise(nodes: List<NodeSnapshot>): Boolean {
+        // "看广告得时长" / "开通免广告加速" are app screens, not a running ad.
+        if (looksLikeAppScreen(nodes)) return false
         val mentioned = nodes.any { node ->
             val text = node.text + " " + node.contentDescription
             if (text.length > 120) return@any false
@@ -512,10 +607,10 @@ object AdDetector {
     }
 
     /** Text-only classification used by the in-app rule tester. */
-    fun classifyText(raw: String): String? {
+    fun classifyText(raw: String, keywords: Set<String> = defaultSkipWords): String? {
         val text = normalize(raw)
         if (text.isEmpty()) return null
-        if (text in skipWords) return "跳过关键词"
+        if (text in keywords) return "跳过关键词"
         if (text.length <= 8 && skipPhrasePattern.containsMatchIn(text)) return "跳过文案"
         if (text in closeWords) return "关闭文案"
         if (pureNumberPattern.matchEntire(text) != null) return "倒计时数字"
@@ -526,10 +621,53 @@ object AdDetector {
     }
 
     /**
+     * Ordinary app screens that merely talk about ads: "看广告得时长",
+     * "开通免广告加速", membership and wallet pages. They must never be
+     * treated as an ad surface, otherwise the service starts "protecting" a
+     * reward on the user's own settings screen.
+     */
+    private val appScreenWords = setOf(
+        "兑换", "明细", "订单", "余额", "充值", "会员", "开通", "我的",
+        "设置", "首页", "返回", "分享", "收藏", "进度", "任务中心",
+        // Bottom navigation of accelerator / game launchers.
+        "找游戏", "社区", "话题", "游戏库", "排行榜", "个人中心",
+    )
+
+    /** Two or more app-UI labels on one screen mean this is not an ad. */
+    fun looksLikeAppScreen(nodes: List<NodeSnapshot>): Boolean {
+        var hits = 0
+        for (node in nodes) {
+            val text = normalize(node.text)
+            if (text.isEmpty() || text.length > 6) continue
+            if (text in appScreenWords) {
+                hits++
+                if (hits >= 2) return true
+            }
+        }
+        return false
+    }
+
+    /** True when the window is an H5 page rendered inside a WebView. */
+    fun isFullscreenWebAd(
+        nodes: List<NodeSnapshot>,
+        screenWidth: Int,
+        screenHeight: Int,
+    ): Boolean {
+        if (screenWidth <= 0 || screenHeight <= 0) return false
+        val hasWebView = nodes.any { it.className.contains("WebView") }
+        if (!hasWebView) return false
+        // Editor-style pages (login, forms) are the app's own content.
+        if (nodes.any { it.className.contains("EditText") }) return false
+        return true
+    }
+
+    /**
      * A window looks like an ad when it contains a real skip label, an ad-SDK
      * view id, or a small "广告" corner label. A plain app screen matches none.
      */
     fun hasStrongAdContext(nodes: List<NodeSnapshot>): Boolean {
+        if (looksLikeAppScreen(nodes)) return false
+
         if (hasSkipLabel(nodes)) return true
 
         val hasSdkId = nodes.any { node ->
@@ -551,6 +689,7 @@ object AdDetector {
      * outright (back out of the ad) rather than played along with.
      */
     fun isForcedBrowseAd(nodes: List<NodeSnapshot>): Boolean {
+        if (looksLikeAppScreen(nodes)) return false
         val hit = nodes.any { node ->
             val text = normalize(node.text)
             text.length in 1..40 && forcedBrowseWords.any { text.contains(it) }
@@ -568,6 +707,74 @@ object AdDetector {
                     text.contains("领奖") || text.contains("領獎")
                 )
         }
+    }
+
+    /**
+     * An ad that only pays out after the user swipes, shakes the phone or
+     * leaves the app for a while. The service abandons these instead of
+     * performing the task: the reward is never worth the detour.
+     */
+    fun isInteractiveAd(nodes: List<NodeSnapshot>): Boolean {
+        if (looksLikeAppScreen(nodes)) return false
+        val hit = nodes.any { node ->
+            val text = normalize(node.text)
+            text.length in 1..30 && interactiveAdPattern.containsMatchIn(text)
+        }
+        if (!hit) return false
+        if (hasStrongAdContext(nodes)) return true
+        return nodes.any { node ->
+            val text = normalize(node.text)
+            text.length <= 40 &&
+                (text.contains("奖励") || text.contains("獎勵") ||
+                    text.contains("广告") || text.contains("廣告"))
+        }
+    }
+
+    /**
+     * Stable id of the current interactive-ad sheet, used so the "quit this
+     * one?" card is asked once per ad instead of once per entry.
+     */
+    fun interactiveSignature(nodes: List<NodeSnapshot>): String? {
+        for (node in nodes) {
+            val text = normalize(node.text)
+            if (text.length in 1..30 && interactiveAdPattern.containsMatchIn(text)) {
+                return text.take(40)
+            }
+        }
+        return null
+    }
+
+    /**
+     * Any small text-less icon pinned to a screen corner. Used when the user
+     * already asked us to abandon an interactive ad: the left corner ×
+     * (normally avoided to protect rewards) is valid here.
+     */
+    fun findAnyCornerClose(
+        nodes: List<NodeSnapshot>,
+        screenWidth: Int,
+        screenHeight: Int,
+    ): SkipCandidate? {
+        var best: SkipCandidate? = null
+        var bestLeft = Int.MAX_VALUE
+        for (node in nodes) {
+            if (!node.enabled) continue
+            if (node.text.isNotBlank() || node.contentDescription.isNotBlank()) continue
+            val bounds = node.bounds
+            if (bounds.width() <= 0 || bounds.height() <= 0) continue
+            if (bounds.width() > screenWidth * 0.12f) continue
+            if (bounds.height() > screenHeight * 0.08f) continue
+            val cornerX = bounds.right > screenWidth * 0.85f || bounds.left < screenWidth * 0.15f
+            val cornerY = bounds.top < screenHeight * 0.12f || bounds.bottom > screenHeight * 0.88f
+            if (!cornerX || !cornerY) continue
+            val clickable = node.clickable || ancestorClickable(nodes, node)
+            if (!clickable) continue
+            // Prefer the left-most icon: the × sits left of the mute button.
+            if (bounds.left < bestLeft) {
+                bestLeft = bounds.left
+                best = SkipCandidate(node.index, 70, "角标关闭", "关闭按钮")
+            }
+        }
+        return best
     }
 
     /**
@@ -640,8 +847,10 @@ object AdDetector {
             if (!node.enabled) continue
             val text = normalize(node.text)
             if (text.isEmpty() || text.length > 8) continue
+            // Never forfeit a reward on the user's behalf.
+            if (text.contains("放弃")) continue
             val matched = text in exitConfirmWords ||
-                text.contains("退出") || text.contains("放弃") ||
+                text.contains("退出") ||
                 text.contains("离开") || text.contains("不看了")
             if (!matched) continue
             val clickable = node.clickable || ancestorClickable(nodes, node)
@@ -729,6 +938,7 @@ object AdDetector {
         strongContext: Boolean,
         nodes: List<NodeSnapshot>,
         suppressCloseAd: Boolean,
+        keywords: Set<String>,
     ): Hit? {
         val text = normalize(raw)
         if (text.isEmpty()) return null
@@ -739,12 +949,12 @@ object AdDetector {
             if (text in closeWords) return null
         }
 
-        if (text in skipWords) {
+        if (text in keywords) {
             if (!skipTextAllowed(node, screenWidth, screenHeight, strongContext, config, nodes)) return null
             return Hit(100, "跳过关键词", raw.trim().take(24))
         }
 
-        if (text.length <= 8 && skipPhrasePattern.containsMatchIn(text)) {
+        if ("跳过" in keywords && text.length <= 8 && skipPhrasePattern.containsMatchIn(text)) {
             if (!skipTextAllowed(node, screenWidth, screenHeight, strongContext, config, nodes)) return null
             return Hit(95, "跳过文案", raw.trim().take(24))
         }
@@ -814,7 +1024,11 @@ object AdDetector {
         if (bounds.width() > MAX_ICON_SIZE_PX || bounds.height() > MAX_ICON_SIZE_PX) return null
 
         val clickable = node.clickable || ancestorClickable(nodes, node)
-        if (!clickable) return null
+        // WebView end cards draw their × as a plain ImageView that reports
+        // clickable=false even though a coordinate tap closes the ad. A small
+        // icon pinned to a corner is accepted without clickability; the tap is
+        // dispatched as a gesture, so it still lands on the icon.
+        if (!clickable && !isCompactCornerIcon(bounds, screenWidth, screenHeight)) return null
 
         // Chat / feed screens also have cute little corner icons. Only a plain
         // ad window (no text input, at most two scrolling containers) may have
@@ -851,6 +1065,16 @@ object AdDetector {
     private fun isSkipLike(text: String): Boolean =
         text.isNotEmpty() &&
             (text in skipWords || (text.length <= 8 && skipPhrasePattern.containsMatchIn(text)))
+
+    /** Small, text-less icon sitting on a screen corner (SDK close affordance). */
+    private fun isCompactCornerIcon(bounds: Rect, screenWidth: Int, screenHeight: Int): Boolean {
+        if (screenWidth <= 0 || screenHeight <= 0) return false
+        if (bounds.width() > screenWidth * 0.10f) return false
+        if (bounds.height() > screenHeight * 0.05f) return false
+        val cornerX = bounds.right > screenWidth * 0.82f || bounds.left < screenWidth * 0.18f
+        val cornerY = bounds.top < screenHeight * 0.14f || bounds.bottom > screenHeight * 0.86f
+        return cornerX && cornerY
+    }
 
     private fun closeIconInContainer(
         node: NodeSnapshot,

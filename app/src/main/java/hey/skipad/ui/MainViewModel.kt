@@ -58,6 +58,17 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         _paused.value = PauseState.isPaused(app)
     }
 
+    /**
+     * Cheap periodic refresh: reinstalling the app silently unbinds the
+     * accessibility service, and the overview used to keep showing "running"
+     * until the screen was left and re-entered.
+     */
+    fun refreshServiceState() {
+        _serviceEnabled.value = AccessibilityUtils.isServiceEnabled(app, AdSkipService::class.java)
+        _paused.value = PauseState.isPaused(app)
+        _overlayGranted.value = OverlayUtils.canDrawOverlays(app)
+    }
+
     fun setPaused(value: Boolean) {
         PauseState.set(app, value)
         _paused.value = value
@@ -70,6 +81,14 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun setEnabled(value: Boolean) {
         update { it.copy(enabled = value) }
+    }
+
+    fun setSplashOnly(value: Boolean) {
+        update { it.copy(splashOnly = value) }
+    }
+
+    fun setSkipFullscreenWebAds(value: Boolean) {
+        update { it.copy(skipFullscreenWebAds = value) }
     }
 
     fun setCountdown(value: Boolean) {
@@ -142,6 +161,30 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun removeBlacklist(packageName: String) {
         update { it.copy(blacklist = it.blacklist - packageName) }
+    }
+
+    /** Adds a user-defined skip label and re-enables it if it was disabled. */
+    fun addKeyword(word: String) {
+        val clean = word.trim()
+        if (clean.isEmpty() || clean.length > 12) return
+        update {
+            it.copy(
+                customKeywords = it.customKeywords + clean,
+                disabledKeywords = it.disabledKeywords - clean,
+            )
+        }
+    }
+
+    /** Stops matching a label: user-defined ones are dropped, built-ins disabled. */
+    fun removeKeyword(word: String) {
+        val clean = word.trim()
+        if (clean.isEmpty()) return
+        update {
+            it.copy(
+                customKeywords = it.customKeywords - clean,
+                disabledKeywords = it.disabledKeywords + clean,
+            )
+        }
     }
 
     fun clearLogs() {

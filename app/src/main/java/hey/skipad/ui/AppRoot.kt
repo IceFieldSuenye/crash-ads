@@ -21,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -37,6 +38,7 @@ import hey.skipad.ui.screens.AboutScreen
 import hey.skipad.ui.screens.LogsScreen
 import hey.skipad.ui.screens.OverviewScreen
 import hey.skipad.ui.screens.RulesScreen
+import kotlinx.coroutines.delay
 
 private const val TAB_OVERVIEW = 0
 private const val TAB_RULES = 1
@@ -57,6 +59,15 @@ fun AppRoot(vm: MainViewModel) {
     val paused by vm.paused.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    // Reinstalling the app unbinds the accessibility service; keep the
+    // overview status live instead of waiting for the next ON_RESUME.
+    LaunchedEffect(Unit) {
+        while (true) {
+            vm.refreshServiceState()
+            delay(1500L)
+        }
+    }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) vm.refreshSystemState()
@@ -118,11 +129,13 @@ fun AppRoot(vm: MainViewModel) {
                         running = running,
                         serviceEnabled = serviceEnabled,
                         batteryIgnored = batteryIgnored,
+                        overlayGranted = overlayGranted,
                         paused = paused,
                         onOpenAccessibility = vm::openAccessibilitySettings,
                         onTogglePause = vm::setPaused,
                         onRequestBattery = vm::requestBatteryWhitelist,
                         onOpenOem = vm::openOemBackgroundSettings,
+                        onRequestOverlay = vm::requestOverlayPermission,
                     )
 
                     TAB_RULES -> RulesScreen(
@@ -140,9 +153,13 @@ fun AppRoot(vm: MainViewModel) {
                         onToggleRunningNotification = vm::setShowRunningNotification,
                         onToggleAutoMute = vm::setAutoMuteVolume,
                         onToggleAutoSwipe = vm::setAutoSwipeFeed,
+                        onToggleSplashOnly = vm::setSplashOnly,
+                        onToggleFullscreenWebAds = vm::setSkipFullscreenWebAds,
                         onCooldownChange = vm::setCooldown,
                         onAddBlacklist = vm::addBlacklist,
                         onRemoveBlacklist = vm::removeBlacklist,
+                        onAddKeyword = vm::addKeyword,
+                        onRemoveKeyword = vm::removeKeyword,
                         onRewardModeChange = vm::setRewardMode,
                         overlayGranted = overlayGranted,
                         onRequestOverlay = vm::requestOverlayPermission,
@@ -151,6 +168,7 @@ fun AppRoot(vm: MainViewModel) {
                     TAB_LOGS -> LogsScreen(
                         logs = logs,
                         onClear = vm::clearLogs,
+                        onDisableKeyword = vm::removeKeyword,
                     )
 
                     else -> AboutScreen()

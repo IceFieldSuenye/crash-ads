@@ -29,6 +29,8 @@ object SettingsRepository {
 
     private object Keys {
         val enabled = booleanPreferencesKey("enabled")
+        val splashOnly = booleanPreferencesKey("splash_only")
+        val skipFullscreenWebAds = booleanPreferencesKey("skip_fullscreen_web_ads")
         val countdown = booleanPreferencesKey("match_countdown")
         val viewId = booleanPreferencesKey("match_view_id")
         val contentDescription = booleanPreferencesKey("match_content_description")
@@ -37,6 +39,8 @@ object SettingsRepository {
         val toast = booleanPreferencesKey("show_toast")
         val cooldown = intPreferencesKey("cooldown_ms")
         val blacklist = stringSetPreferencesKey("blacklist")
+        val customKeywords = stringSetPreferencesKey("custom_keywords")
+        val disabledKeywords = stringSetPreferencesKey("disabled_keywords")
         val rewardMode = stringPreferencesKey("reward_mode")
         val closePopups = booleanPreferencesKey("close_popups")
         val notifySkip = booleanPreferencesKey("notify_skip")
@@ -55,6 +59,8 @@ object SettingsRepository {
         val next = transform(ctx.settingsStore.data.first().toSettings())
         ctx.settingsStore.edit { prefs ->
             prefs[Keys.enabled] = next.enabled
+            prefs[Keys.splashOnly] = next.splashOnly
+            prefs[Keys.skipFullscreenWebAds] = next.skipFullscreenWebAds
             prefs[Keys.countdown] = next.matchCountdown
             prefs[Keys.viewId] = next.matchViewId
             prefs[Keys.contentDescription] = next.matchContentDescription
@@ -63,6 +69,8 @@ object SettingsRepository {
             prefs[Keys.toast] = next.showToast
             prefs[Keys.cooldown] = next.cooldownMs
             prefs[Keys.blacklist] = next.blacklist
+            prefs[Keys.customKeywords] = next.customKeywords
+            prefs[Keys.disabledKeywords] = next.disabledKeywords
             prefs[Keys.rewardMode] = next.rewardMode.name
             prefs[Keys.closePopups] = next.closePopups
             prefs[Keys.notifySkip] = next.notifySkip
@@ -76,6 +84,8 @@ object SettingsRepository {
 
     private fun Preferences.toSettings(): AppSettings = AppSettings(
         enabled = this[Keys.enabled] ?: true,
+        splashOnly = this[Keys.splashOnly] ?: false,
+        skipFullscreenWebAds = this[Keys.skipFullscreenWebAds] ?: true,
         matchCountdown = this[Keys.countdown] ?: true,
         matchViewId = this[Keys.viewId] ?: true,
         matchContentDescription = this[Keys.contentDescription] ?: true,
@@ -84,6 +94,8 @@ object SettingsRepository {
         showToast = this[Keys.toast] ?: true,
         cooldownMs = this[Keys.cooldown] ?: 1200,
         blacklist = this[Keys.blacklist] ?: emptySet(),
+        customKeywords = this[Keys.customKeywords] ?: emptySet(),
+        disabledKeywords = this[Keys.disabledKeywords] ?: emptySet(),
         rewardMode = this[Keys.rewardMode]
             ?.let { raw -> RewardMode.entries.firstOrNull { it.name == raw } }
             ?: RewardMode.ASK,

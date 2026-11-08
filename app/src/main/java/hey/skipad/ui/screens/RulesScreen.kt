@@ -62,9 +62,13 @@ fun RulesScreen(
     onToggleRunningNotification: (Boolean) -> Unit,
     onToggleAutoMute: (Boolean) -> Unit,
     onToggleAutoSwipe: (Boolean) -> Unit,
+    onToggleSplashOnly: (Boolean) -> Unit,
+    onToggleFullscreenWebAds: (Boolean) -> Unit,
     onCooldownChange: (Int) -> Unit,
     onAddBlacklist: (String) -> Unit,
     onRemoveBlacklist: (String) -> Unit,
+    onAddKeyword: (String) -> Unit,
+    onRemoveKeyword: (String) -> Unit,
     onRewardModeChange: (RewardMode) -> Unit,
     overlayGranted: Boolean,
     onRequestOverlay: () -> Unit,
@@ -143,7 +147,28 @@ fun RulesScreen(
                     checked = settings.autoSwipeFeed,
                     onCheckedChange = onToggleAutoSwipe,
                 )
+                SwitchRow(
+                    title = "仅开屏跳过广告",
+                    description = "只处理应用启动那几秒的开屏 / 插屏广告，其他界面一律不动",
+                    checked = settings.splashOnly,
+                    onCheckedChange = onToggleSplashOnly,
+                )
+                SwitchRow(
+                    title = "全屏网页广告",
+                    description = "跳过全屏 WebView / H5 广告；关闭后不碰这类页面，避免误关应用自己的网页",
+                    checked = settings.skipFullscreenWebAds,
+                    onCheckedChange = onToggleFullscreenWebAds,
+                )
             }
+        }
+
+        item {
+            KeywordsCard(
+                keywords = (AdDetector.defaultSkipWords - settings.disabledKeywords)
+                    .sorted() + settings.customKeywords.sorted(),
+                onAdd = onAddKeyword,
+                onRemove = onRemoveKeyword,
+            )
         }
 
         item {
@@ -189,6 +214,68 @@ fun RulesScreen(
             )
         }
         item { RuleTestCard() }
+    }
+}
+
+@Composable
+private fun KeywordsCard(
+    keywords: List<String>,
+    onAdd: (String) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    var input by remember { mutableStateOf("") }
+    var expanded by remember { mutableStateOf(false) }
+    val visible = if (expanded) keywords else keywords.take(10)
+
+    SectionCard {
+        Text("拦截关键词", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "按钮文案完全命中这些词时才会点击。移除后不再匹配，也可以自己补充。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+
+        visible.forEach { word ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = word,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                TextButton(onClick = { onRemove(word) }) {
+                    Text("移除", color = SunsetOrange)
+                }
+            }
+        }
+        if (keywords.size > 10) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "收起" else "展开全部（${keywords.size}）")
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = input,
+                onValueChange = { input = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("例如 跳过 5 秒") },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            FilledTonalButton(
+                onClick = {
+                    onAdd(input)
+                    input = ""
+                },
+                enabled = input.isNotBlank(),
+            ) {
+                Text("添加")
+            }
+        }
     }
 }
 
