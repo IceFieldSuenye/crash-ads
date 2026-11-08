@@ -1,0 +1,1035 @@
+package hey.skipad.service
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.content.Intent
+import android.graphics.Path
+import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import android.view.Gravity
+import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
+import hey.skipad.BuildConfig
+import hey.skipad.data.AppSettings
+import hey.skipad.data.LogStore
+import hey.skipad.data.RewardMode
+import hey.skipad.data.SettingsRepository
+import hey.skipad.data.SkipOutcome
+import hey.skipad.data.StatsRepository
+import hey.skipad.util.NotificationHelper
+import hey.skipad.util.OverlayUtils
+import hey.skipad.util.PauseState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+
+class AdSkipService : AccessibilityService() {
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val handler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var settings = AppSettings()
+
+    @Volatile
+    private var todayCount = 0
+
+    private var pendingPackage: String? = null
+    private var lastClickAt = 0L
+    private var lastSignature: String? = null
+    private var lastSignatureAt = 0L
+
+    private var forceSkipOnce = false
+    private var bypassCooldownOnce = false
+    private var rewardWaitPackage: String? = null
+    private var rewardWaitSince = 0L
+    private var lastPromptPackage: String? = null
+    private var lastPromptAt = 0L
+    private var rewardBall: RewardBall? = null
+    private var lastDumpAt = 0L
+    private var lastDumpKey: String? = null
+    private var lastTraceAt = 0L
+
+    private val ocr: ScreenshotOcr by lazy { ScreenshotOcr(this) }
+    @Volatile
+    private var launchWindowUntil = 0L
+    private var lastForegroundPackage: String? = null
+    private var adLabelTapPkg: String? = null
+    private var adLabelTapCount = 0
+    private var lastAdLabelTapAt = 0L
+    private var lastVolumePkg: String? = null
+    private var lastVolumeTapAt = 0L
+    private var lastSwipeAt = 0L
+
+    /** Hard cooldown: while active, no node is tapped at all. */
+    private var suppressClickUntil = 0L
+
+    /** Package currently showing a rewarded video (reward protection active). */
+    private var rewardContextPkg: String? = null
+    private var rewardPopupTapAt = 0L
+    private var rewardPopupTapCount = 0
+
+    private var imePackages: Set<String> = emptySet()
+    private var imePackagesAt = 0L
+
+    /** Forced-browse ads are abandoned: back out, then click "确定退出". */
+    private var lastForceQuitAt = 0L
+    private var forceQuitUntil = 0L
+    private var forceQuitAttempts = 0
+    private var forceQuitWindowStart = 0L
+
+    /** Last time the "继续看视频" link was tapped (WebView overlay de-dupe). */
+    private var lastContinueAt = 0L
+
+    private val ocrPollRunnable: Runnable = object : Runnable {
+        override fun run() {
+            if (SystemClock.elapsedRealtime() < launchWindowUntil) {
+                pendingPackage?.let { maybeOcrTap(it) }
+                handler.postDelayed(this, OCR_POLL_MS)
+            }
+        }
+    }
+
+    private val processRunnable = Runnable {
+        val pkg = pendingPackage ?: return@Runnable
+        processWindow(pkg)
+    }
+
+    private val rescanRunnableA = Runnable { pendingPackage?.let(::processWindow) }
+    private val rescanRunnableB = Runnable { pendingPackage?.let(::processWindow) }
+    private val postClickScan = Runnable {
+        bypassCooldownOnce = true
+        pendingPackage?.let(::processWindow)
+    }
+    private val promptTimeoutRunnable = Runnable {
+        dismissRewardBall()
+    }
+
+    override fun onServiceConnected() {
+        runCatching {
+            super.onServiceConnected()
+            instance = this
+            _running.value = true
+            serviceScope.launch {
+                SettingsRepository.settings.collect { latest ->
+                    settings = latest
+                    if (_running.value) {
+                        if (latest.showRunningNotification) {
+                            NotificationHelper.notifyRunning(this@AdSkipService)
+                        } else {
+                            NotificationHelper.cancelRunning(this@AdSkipService)
+                        }
+                    }
+                }
+            }
+            serviceScope.launch {
+                StatsRepository.stats.collect { latest -> todayCount = latest.today }
+            }
+        }
+    }
+
+    /**
+     * The ongoing notification drives pause/resume through [PauseReceiver].
+     * When the receiver barges in with [ACTION_PAUSE_CHANGED] we drop every
+     * queued scan immediately so the switch feels instant.
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_PAUSE_CHANGED -> applyPauseState()
+            ACTION_TOGGLE_PAUSE -> {
+                PauseState.toggle(this)
+                applyPauseState()
+            }
+        }
+        if (instance == null) {
+            // startService() on an AccessibilityService that is not bound by
+            // the system would create a zombie: shut it down again.
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
+
+    private fun applyPauseState() {
+        if (PauseState.isPaused(this)) {
+            handler.removeCallbacks(processRunnable)
+            handler.removeCallbacks(rescanRunnableA)
+            handler.removeCallbacks(rescanRunnableB)
+            handler.removeCallbacks(postClickScan)
+            handler.removeCallbacks(ocrPollRunnable)
+            launchWindowUntil = 0
+            dismissRewardBall()
+            rewardWaitPackage = null
+            rewardContextPkg = null
+        }
+        NotificationHelper.notifyRunning(this)
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        instance = null
+        _running.value = false
+        rewardContextPkg = null
+        NotificationHelper.cancelRunning(this)
+        return super.onUnbind(intent)
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Any exception here would take the whole accessibility service down
+        // and leave the user with a "running" switch that silently does nothing.
+        runCatching { handleAccessibilityEvent(event) }
+    }
+
+    private fun handleAccessibilityEvent(event: AccessibilityEvent?) {
+        val source = event ?: return
+        val pkg = source.packageName?.toString().orEmpty()
+        if (pkg.isEmpty() || pkg == packageName) return
+        if (isSystemPackage(pkg)) return
+        if (!settings.enabled) return
+        if (settings.blacklist.contains(pkg)) return
+        if (!isRelevantEvent(source.eventType)) return
+
+        pendingPackage = pkg
+        val isWindowChange = source.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        if (pkg != lastForegroundPackage) {
+            // A new app came to the foreground: run control-tree detection and
+            // OCR in parallel for the first 6 seconds.
+            lastForegroundPackage = pkg
+            launchWindowUntil = SystemClock.elapsedRealtime() + LAUNCH_WINDOW_MS
+            handler.removeCallbacks(ocrPollRunnable)
+            handler.postDelayed(ocrPollRunnable, OCR_POLL_MS)
+        }
+        handler.removeCallbacks(processRunnable)
+        handler.postDelayed(processRunnable, if (isWindowChange) FAST_DELAY_MS else SLOW_DELAY_MS)
+
+        // Splash / interstitial ads finish loading slightly after the window appears.
+        if (isWindowChange) {
+            handler.removeCallbacks(rescanRunnableA)
+            handler.removeCallbacks(rescanRunnableB)
+            handler.postDelayed(rescanRunnableA, 150L)
+            handler.postDelayed(rescanRunnableB, 420L)
+        }
+    }
+
+    override fun onInterrupt() = Unit
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        dismissRewardBall()
+        runCatching { ocr.close() }
+        NotificationHelper.cancelRunning(this)
+        serviceScope.cancel()
+        instance = null
+        _running.value = false
+        super.onDestroy()
+    }
+
+    private fun isRelevantEvent(type: Int): Boolean =
+        type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+            type == AccessibilityEvent.TYPE_VIEW_SCROLLED
+
+    /**
+     * System UI surfaces (notification shade, status bar, settings, launcher,
+     * IME, vendor side panels) must never be scanned: our own notifications
+     * live there and a global side bar would otherwise be tapped through.
+     * Soft keyboards are matched through InputMethodManager as well, because
+     * vendor IMEs such as com.baidu.input do not contain the "inputmethod" token.
+     */
+    private fun isSystemPackage(pkg: String): Boolean {
+        if (pkg.isEmpty()) return true
+        if (pkg == "android") return true
+        if (SYSTEM_PACKAGE_PREFIXES.any { pkg.startsWith(it) }) return true
+        if (SYSTEM_PACKAGE_KEYWORDS.any { pkg.contains(it) }) return true
+        return isImePackage(pkg)
+    }
+
+    private fun isImePackage(pkg: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (imePackages.isEmpty() || now - imePackagesAt > 30_000L) {
+            imePackagesAt = now
+            imePackages = runCatching {
+                val imm = getSystemService(InputMethodManager::class.java)
+                if (imm == null) {
+                    emptySet()
+                } else {
+                    (imm.inputMethodList + imm.enabledInputMethodList)
+                        .mapNotNull { it.packageName }
+                        .toSet()
+                }
+            }.getOrDefault(emptySet())
+        }
+        return pkg in imePackages
+    }
+
+    /** A soft keyboard window is on top: the tree below it is not an ad. */
+    private fun isImeWindowActive(): Boolean = runCatching {
+        windows.any { window ->
+            window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
+                (window.isActive || window.isFocused)
+        }
+    }.getOrDefault(false)
+
+    /**
+     * A system surface (vivo side bar, screenshot bar, game overlay...) owns the
+     * focused window. Taps aimed at the app underneath would land on it.
+     */
+    private fun isSystemWindowOnTop(): Boolean = runCatching {
+        windows.any { window ->
+            val focused = window.isActive || window.isFocused
+            if (!focused) return@any false
+            isSystemPackage(window.root?.packageName?.toString().orEmpty())
+        }
+    }.getOrDefault(false)
+
+    private fun processWindow(pkg: String) {
+        runCatching { doProcessWindow(pkg) }
+            .onFailure { error ->
+                runCatching {
+                    LogStore.add(
+                        "hey.skipad",
+                        "服务异常",
+                        error.javaClass.simpleName,
+                        SkipOutcome.FAILED,
+                    )
+                }
+            }
+    }
+
+    private fun doProcessWindow(pkg: String) {
+        if (!settings.enabled) return
+        if (PauseState.isPaused(this)) return
+        if (isSystemPackage(pkg)) return
+        if (settings.blacklist.contains(pkg)) return
+
+        val now = SystemClock.elapsedRealtime()
+        if (now < suppressClickUntil) return
+        val cooling = now - lastClickAt < settings.cooldownMs
+        if (cooling && !bypassCooldownOnce) return
+        bypassCooldownOnce = false
+
+        // Soft keyboard on screen: never inspect or tap the tree underneath.
+        if (isImeWindowActive()) return
+        // Vendor side bar / system overlay owns the focus: leave it alone.
+        if (isSystemWindowOnTop()) return
+
+        val root = rootInActiveWindow ?: return
+        val rootPackage = root.packageName?.toString().orEmpty()
+        val tree = NodeExtractor.extract(root)
+        dumpTreeForDebug(pkg, rootPackage, tree.nodes)
+
+        if (rootPackage.isNotEmpty() && rootPackage != pkg) return
+        if (isSystemPackage(rootPackage)) return
+
+        // Any screen with a text field is an input surface (chat box, search,
+        // keyboard toolbar). Its "退 / 关闭 / 取消" controls are never ads.
+        if (tree.nodes.any { it.className.contains("EditText") }) return
+
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+
+        val strongContext = AdDetector.hasStrongAdContext(tree.nodes)
+        val promise = AdDetector.rewardPromise(tree.nodes)
+        val unskippable = AdDetector.isUnskippableVideo(tree.nodes)
+        if (promise || unskippable || rewardWaitPackage == pkg) {
+            if (rewardContextPkg != pkg) {
+                rewardPopupTapCount = 0
+                rewardPopupTapAt = 0L
+            }
+            rewardContextPkg = pkg
+        }
+        val inRewardContext = rewardContextPkg == pkg
+
+        // 0) "是否放弃提前领奖？" confirmation: it appears right after 继续看视频
+        //    is tapped, and 确认放弃 is what actually resumes playback.
+        val abandon = AdDetector.findEarlyRewardAbandon(tree.nodes)
+        if (abandon != null) {
+            val abandonNode = tree.refs.getOrNull(abandon.nodeIndex)
+            if (abandonNode != null && performSkip(abandonNode) != SkipOutcome.FAILED) {
+                lastClickAt = SystemClock.elapsedRealtime()
+                forceQuitUntil = 0L
+                LogStore.add(pkg, abandon.label, "放弃提前领奖·继续视频", SkipOutcome.CLICKED)
+                return
+            }
+        }
+
+        // 1) Promo sheet on top of a rewarded video. Two flavours:
+        //    a) it offers "继续看视频" → tap that, playback resumes and the
+        //       reward still lands;
+        //    b) it only offers a forced detour ("browse 10s / play a game")
+        //       with no way back → abandon the ad (跳过, else back out).
+        if (AdDetector.isForcedBrowseAd(tree.nodes)) {
+            val resume = AdDetector.findContinueWatching(tree.nodes)
+            if (resume != null) {
+                val resumeNode = tree.refs.getOrNull(resume.nodeIndex)
+                val resumeAt = SystemClock.elapsedRealtime()
+                // The sheet is a WebView overlay: tapping the same link again
+                // before the SDK reacts would just pile up identical taps.
+                if (resumeNode != null && resumeAt - lastContinueAt > 1500L &&
+                    performSkip(resumeNode) != SkipOutcome.FAILED
+                ) {
+                    lastContinueAt = resumeAt
+                    lastClickAt = resumeAt
+                    forceQuitUntil = 0L
+                    LogStore.add(pkg, resume.label, "继续观看", SkipOutcome.CLICKED)
+                }
+                return
+            }
+
+            val forcedAt = SystemClock.elapsedRealtime()
+            if (forcedAt - forceQuitWindowStart > 30_000L) {
+                forceQuitWindowStart = forcedAt
+                forceQuitAttempts = 0
+                lastForceQuitAt = 0L
+            }
+            if (forcedAt - lastForceQuitAt < 1500L) return
+            if (forceQuitAttempts >= 3) return
+            forceQuitAttempts++
+            lastForceQuitAt = forcedAt
+
+            forceQuitUntil = forcedAt + 8000L
+            rewardWaitPackage = null
+            rewardContextPkg = null
+            dismissRewardBall()
+
+            val skip = AdDetector.findSkipButton(tree.nodes)
+            val skipNode = skip?.let { tree.refs.getOrNull(it.nodeIndex) }
+            if (skipNode != null && performSkip(skipNode) != SkipOutcome.FAILED) {
+                lastClickAt = SystemClock.elapsedRealtime()
+                if (forceQuitAttempts == 1) {
+                    LogStore.add(pkg, "强制浏览广告", "跳过退出", SkipOutcome.CLICKED)
+                }
+                return
+            }
+
+            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            if (forceQuitAttempts == 1) {
+                LogStore.add(pkg, "强制浏览广告", "直接退出", SkipOutcome.GESTURE)
+            }
+            return
+        }
+
+        // While backing out, answer the confirmation with "确定退出" and never
+        // with 继续观看 (that would undo the exit).
+        if (SystemClock.elapsedRealtime() < forceQuitUntil) {
+            val confirm = AdDetector.findExitConfirm(tree.nodes)
+            if (confirm != null) {
+                val node = tree.refs.getOrNull(confirm.nodeIndex)
+                if (node != null && performSkip(node) != SkipOutcome.FAILED) {
+                    lastClickAt = SystemClock.elapsedRealtime()
+                    forceQuitUntil = 0
+                    LogStore.add(pkg, confirm.label, "退出确认", SkipOutcome.CLICKED)
+                    return
+                }
+            }
+            val quitAt = SystemClock.elapsedRealtime()
+            if (forceQuitAttempts < 4 && quitAt - lastForceQuitAt > 1000L) {
+                lastForceQuitAt = quitAt
+                forceQuitAttempts++
+                performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            }
+            return
+        }
+
+        // 1) "关闭广告后将无法获得奖励" sheet: answer with 继续观看, never close.
+        val exit = AdDetector.findRewardExit(tree.nodes)
+        if (exit != null) {
+            val resume = exit.resume
+            if (resume != null) {
+                val node = tree.refs.getOrNull(resume.nodeIndex)
+                if (node != null && performSkip(node) != SkipOutcome.FAILED) {
+                    lastClickAt = SystemClock.elapsedRealtime()
+                    LogStore.add(pkg, "继续观看", "撤回退出", SkipOutcome.CLICKED)
+                    showRewardBall(pkg)
+                    return
+                }
+            }
+            // No safe button to tap: back off rather than closing the ad.
+            suppressClickUntil = SystemClock.elapsedRealtime() + REWARD_EXIT_COOLDOWN_MS
+            LogStore.add(
+                pkg,
+                exit.message.ifBlank { "奖励确认弹窗" },
+                "已暂停点击以保护奖励",
+                SkipOutcome.BLOCKED,
+            )
+            return
+        }
+
+        // 2) Popups that interrupt a rewarded video: close them (× / 关闭 /
+        //    稍后 / 我知道了) so playback resumes and the reward still lands.
+        if (inRewardContext) {
+            val popup = AdDetector.findInterruptPopup(tree.nodes)
+            if (popup != null && canDismissRewardPopup()) {
+                val node = tree.refs.getOrNull(popup.nodeIndex)
+                if (node != null && performSkip(node) != SkipOutcome.FAILED) {
+                    lastClickAt = SystemClock.elapsedRealtime()
+                    LogStore.add(pkg, popup.label, "奖励弹窗·关闭", SkipOutcome.CLICKED)
+                    return
+                }
+            }
+        }
+
+        // 3) Mute the video ad via its speaker icon (rewarded videos too).
+        if (settings.autoMuteVolume) {
+            val volume = AdDetector.findVolumeButton(tree.nodes, width, height, strongContext)
+            if (volume != null && canTapVolume(pkg)) {
+                val node = tree.refs.getOrNull(volume.nodeIndex)
+                if (node != null && performSkip(node) != SkipOutcome.FAILED) {
+                    lastVolumeTapAt = SystemClock.elapsedRealtime()
+                    LogStore.add(pkg, "音量图标", "静音", SkipOutcome.CLICKED)
+                    return
+                }
+            }
+        }
+
+        // 4) A rewarded video that is still playing cannot be skipped: tapping
+        //    any close affordance here would forfeit the reward.
+        if (unskippable) return
+
+        // 5) Reward gate: hold the skip while the reward is still pending.
+        if (rewardGate(pkg, tree.nodes)) return
+
+        val config = DetectorConfig(
+            matchCountdown = settings.matchCountdown,
+            matchViewId = settings.matchViewId,
+            matchContentDescription = settings.matchContentDescription,
+            matchCloseIcon = true,
+            aggressive = settings.aggressive,
+        )
+
+        val suppressClose = inRewardContext
+        val hit = findSkip(tree, pkg, width, height, config, suppressClose)
+            ?: if (suppressClose) null else scanPopupClose(pkg, width, height, config)
+        traceDetection(pkg, tree.nodes, hit?.second)
+
+        // Feed ads (e.g. QQ Zone): the "关闭此条广告" sheet is already open.
+        if (!suppressClose) {
+            val closeThis = AdDetector.findCloseThisAd(tree.nodes)
+            if (closeThis != null) {
+                forceSkipOnce = false
+                launchWindowUntil = 0
+                handler.removeCallbacks(ocrPollRunnable)
+                clickCandidate(tree, closeThis, pkg)
+                return
+            }
+        }
+
+        if (hit != null) {
+            forceSkipOnce = false
+            launchWindowUntil = 0
+            handler.removeCallbacks(ocrPollRunnable)
+            clickCandidate(hit.first, hit.second, pkg)
+            return
+        }
+
+        // Two-step feed ad: tap the small "广告" pill to open the close sheet.
+        if (settings.tapAdLabel && !suppressClose) {
+            val adLabel = AdDetector.findAdLabel(tree.nodes, width, height)
+            if (adLabel != null && canTapAdLabel(pkg)) {
+                clickCandidate(tree, adLabel, pkg)
+                return
+            }
+        }
+
+        if (!suppressClose && maybeSwipeFeed(pkg, tree)) return
+
+        if (!suppressClose && SystemClock.elapsedRealtime() < launchWindowUntil) {
+            maybeOcrTap(pkg)
+        }
+    }
+
+    private fun canTapVolume(pkg: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (pkg != lastVolumePkg) {
+            lastVolumePkg = pkg
+            lastVolumeTapAt = 0L
+        }
+        if (now - lastVolumeTapAt < 60_000L) return false
+        return true
+    }
+
+    /**
+     * Feed ads (Douyin etc.) have no skip button; swipe up to move past them.
+     */
+    private fun maybeSwipeFeed(pkg: String, tree: NodeTree): Boolean {
+        if (!settings.autoSwipeFeed) return false
+        if (pkg != DOUYIN_PACKAGE) return false
+        if (SystemClock.elapsedRealtime() - lastSwipeAt < 3000L) return false
+        if (!AdDetector.hasAdLabel(tree.nodes)) return false
+
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels.toFloat()
+        val height = metrics.heightPixels.toFloat()
+        val path = Path().apply {
+            moveTo(width * 0.5f, height * 0.72f)
+            lineTo(width * 0.5f, height * 0.28f)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 280L))
+            .build()
+        if (!dispatchGesture(gesture, null, null)) return false
+
+        lastSwipeAt = SystemClock.elapsedRealtime()
+        LogStore.add(pkg, "信息流广告", "自动上滑", SkipOutcome.GESTURE)
+        return true
+    }
+
+    private fun canTapAdLabel(pkg: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (pkg != adLabelTapPkg) {
+            adLabelTapPkg = pkg
+            adLabelTapCount = 0
+        }
+        if (now - lastAdLabelTapAt < 2000L) return false
+        if (adLabelTapCount >= 3) return false
+        lastAdLabelTapAt = now
+        adLabelTapCount++
+        return true
+    }
+
+    /** Rate-limit closing interrupt popups so a stuck loop cannot machine-gun taps. */
+    private fun canDismissRewardPopup(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - rewardPopupTapAt < 2500L) return false
+        if (rewardPopupTapCount >= 6) return false
+        rewardPopupTapAt = now
+        rewardPopupTapCount++
+        return true
+    }
+
+    private fun maybeOcrTap(pkg: String) {
+        if (!settings.ocrEnabled) return
+        // Never OCR-skip while a reward is pending: the "跳过" text on a
+        // rewarded video would otherwise be tapped and the reward lost.
+        if (rewardWaitPackage == pkg || rewardContextPkg == pkg) return
+        if (SystemClock.elapsedRealtime() - lastClickAt < settings.cooldownMs) return
+        runCatching {
+            ocr.scan { rect ->
+                runCatching {
+                    if (rect.width() <= 0 || rect.height() <= 0) return@runCatching
+                    val path = Path().apply { moveTo(rect.exactCenterX(), rect.exactCenterY()) }
+                    val gesture = GestureDescription.Builder()
+                        .addStroke(GestureDescription.StrokeDescription(path, 0L, GESTURE_DURATION_MS))
+                        .build()
+                    if (dispatchGesture(gesture, null, null)) {
+                        lastClickAt = SystemClock.elapsedRealtime()
+                        launchWindowUntil = 0
+                        handler.removeCallbacks(ocrPollRunnable)
+                        LogStore.add(pkg, "图片识别 · 跳过", "OCR", SkipOutcome.GESTURE)
+                        serviceScope.launch { StatsRepository.bump() }
+                        if (settings.showToast) showSkipToast("OCR")
+                        if (settings.notifySkip) {
+                            NotificationHelper.notifySkip(applicationContext, "图片识别 · 跳过", "OCR", todayCount)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Looks for small (non-fullscreen) popup / banner windows that carry an
+     * ad label and a close affordance.
+     */
+    private fun scanPopupClose(
+        pkg: String,
+        screenWidth: Int,
+        screenHeight: Int,
+        config: DetectorConfig,
+    ): Pair<NodeTree, SkipCandidate>? {
+        if (!settings.closePopups) return null
+        var best: Pair<NodeTree, SkipCandidate>? = null
+        runCatching {
+            val screenArea = screenWidth.toLong() * screenHeight
+            for (window in windows) {
+                val root = window.root ?: continue
+                if (root.packageName?.toString() != pkg) continue
+                val bounds = Rect()
+                window.getBoundsInScreen(bounds)
+                val area = bounds.width().toLong() * bounds.height()
+                if (area >= screenArea * 92 / 100) continue
+                if (area < screenArea * 4 / 100) continue
+                val tree = NodeExtractor.extract(root)
+                val candidate = AdDetector.detectPopupClose(tree.nodes, bounds, config) ?: continue
+                val current = best
+                if (current == null || candidate.score > current.second.score) {
+                    best = tree to candidate
+                }
+            }
+        }
+        return best
+    }
+
+    /**
+     * Returns true when this round should NOT click (waiting for a reward).
+     */
+    private fun rewardGate(pkg: String, nodes: List<NodeSnapshot>): Boolean {
+        if (forceSkipOnce) {
+            forceSkipOnce = false
+            rewardWaitPackage = null
+            rewardContextPkg = null
+            dismissRewardBall()
+            return false
+        }
+
+        // The video finished (end card / CTA visible): the reward is safe now,
+        // so stop protecting it and let the ad be closed.
+        val granted = AdDetector.rewardGranted(nodes) || AdDetector.rewardFinished(nodes)
+        if (granted) {
+            rewardWaitPackage = null
+            rewardContextPkg = null
+            dismissRewardBall()
+            return false
+        }
+
+        val promise = AdDetector.rewardPromise(nodes)
+        if (!promise || settings.rewardMode == RewardMode.IMMEDIATE) return false
+
+        if (rewardWaitPackage != pkg) {
+            rewardWaitPackage = pkg
+            rewardWaitSince = SystemClock.elapsedRealtime()
+        }
+        val waited = SystemClock.elapsedRealtime() - rewardWaitSince
+
+        if (settings.rewardMode == RewardMode.ASK) {
+            if (!OverlayUtils.canDrawOverlays(this)) return waited < REWARD_WAIT_MS
+            if (rewardBall?.isShowing() != true && canPromptReward(pkg)) {
+                showRewardBall(pkg)
+            }
+            return waited < REWARD_WAIT_MS
+        }
+
+        return waited < REWARD_WAIT_MS
+    }
+
+    private fun activeTree(pkg: String): NodeTree? {
+        val root = rootInActiveWindow ?: return null
+        val rootPackage = root.packageName?.toString().orEmpty()
+        if (rootPackage.isNotEmpty() && rootPackage != pkg) return null
+        return NodeExtractor.extract(root)
+    }
+
+    private fun findSkip(
+        tree: NodeTree,
+        pkg: String,
+        width: Int,
+        height: Int,
+        config: DetectorConfig,
+        suppressCloseAd: Boolean,
+    ): Pair<NodeTree, SkipCandidate>? {
+        val primary = AdDetector.detect(tree.nodes, width, height, config, suppressCloseAd)
+        if (primary != null) return tree to primary
+
+        for (root in otherWindowRoots(pkg)) {
+            val other = NodeExtractor.extract(root)
+            val candidate = AdDetector.detect(other.nodes, width, height, config, suppressCloseAd) ?: continue
+            return other to candidate
+        }
+        return null
+    }
+
+    private fun otherWindowRoots(pkg: String): List<AccessibilityNodeInfo> {
+        val roots = ArrayList<AccessibilityNodeInfo>(2)
+        runCatching {
+            val active = rootInActiveWindow
+            for (window in windows) {
+                if (roots.size >= 2) break
+                val root = window.root ?: continue
+                if (root == active) continue
+                if (root.packageName?.toString() != pkg) continue
+                roots.add(root)
+            }
+        }
+        return roots
+    }
+
+    private fun clickCandidate(tree: NodeTree, candidate: SkipCandidate, pkg: String) {
+        val node = tree.refs.getOrNull(candidate.nodeIndex) ?: return
+        val signature = pkg + "|" + candidate.rule + "|" + candidate.label + "|" + node.boundsKey()
+        val now = SystemClock.elapsedRealtime()
+        if (signature == lastSignature && now - lastSignatureAt < SAME_TARGET_WINDOW_MS) return
+
+        val outcome = performSkip(node)
+        if (outcome == SkipOutcome.FAILED) return
+
+        lastClickAt = now
+        lastSignature = signature
+        lastSignatureAt = now
+
+        LogStore.add(pkg, candidate.label, candidate.rule, outcome)
+        serviceScope.launch { StatsRepository.bump() }
+
+        // Re-check shortly after the tap: some splash ads ignore the first
+        // coordinate tap until their skip button becomes active.
+        handler.removeCallbacks(postClickScan)
+        handler.postDelayed(postClickScan, 260L)
+
+        if (settings.showToast) {
+            showSkipToast(candidate.rule)
+        }
+        if (settings.notifySkip) {
+            NotificationHelper.notifySkip(
+                applicationContext,
+                candidate.label,
+                candidate.rule,
+                todayCount,
+            )
+        }
+    }
+
+    /** System Toast channel, pinned to the bottom of the screen. */
+    private fun showSkipToast(rule: String) {
+        val toast = Toast.makeText(applicationContext, "已跳过 · $rule", Toast.LENGTH_SHORT)
+        toast.setGravity(Gravity.BOTTOM, 0, (resources.displayMetrics.density * 72).toInt())
+        toast.show()
+    }
+
+    private fun performSkip(node: AccessibilityNodeInfo): SkipOutcome {
+        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return SkipOutcome.CLICKED
+        }
+
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < MAX_PARENT_SEARCH) {
+            if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return SkipOutcome.CLICKED
+            }
+            parent = parent.parent
+            depth++
+        }
+
+        if (settings.gestureFallback) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                val path = Path().apply {
+                    moveTo(bounds.exactCenterX(), bounds.exactCenterY())
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, GESTURE_DURATION_MS))
+                    .build()
+                if (dispatchGesture(gesture, null, null)) {
+                    return SkipOutcome.GESTURE
+                }
+            }
+        }
+        return SkipOutcome.FAILED
+    }
+
+    private fun canPromptReward(pkg: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (pkg == lastPromptPackage && now - lastPromptAt < PROMPT_COOLDOWN_MS) return false
+        lastPromptPackage = pkg
+        lastPromptAt = now
+        return true
+    }
+
+    private fun showRewardBall(pkg: String) {
+        if (rewardBall?.isShowing() == true) return
+        val ball = RewardBall(this) {
+            forceSkipOnce = true
+            handler.post(processRunnable)
+        }
+        if (!ball.show()) {
+            rewardWaitPackage = pkg
+            rewardWaitSince = SystemClock.elapsedRealtime()
+            return
+        }
+        rewardBall = ball
+        handler.removeCallbacks(promptTimeoutRunnable)
+        handler.postDelayed(promptTimeoutRunnable, PROMPT_TIMEOUT_MS)
+    }
+
+    private fun dismissRewardBall() {
+        handler.removeCallbacks(promptTimeoutRunnable)
+        rewardBall?.dismiss()
+        rewardBall = null
+    }
+
+    private fun traceDetection(pkg: String, nodes: List<NodeSnapshot>, candidate: SkipCandidate?) {
+        if (!BuildConfig.DEBUG) return
+        val now = System.currentTimeMillis()
+        if (now - lastTraceAt < 150L) return
+        lastTraceAt = now
+        runCatching {
+            val dir = getExternalFilesDir(null) ?: return@runCatching
+            val file = File(dir, "trace.log")
+            val builder = StringBuilder(160)
+            builder.append(now % 1000000).append(" pkg=").append(pkg)
+                .append(" n=").append(nodes.size)
+                .append(" cand=")
+                .append(candidate?.let { "${it.rule}#${it.score}(${it.label})" } ?: "-")
+            val keys = nodes.asSequence()
+                .filter { node ->
+                    val text = node.text.trim()
+                    text.contains("跳过") || text.contains("广告") || text.contains("廣告") ||
+                        (text.matches(Regex("^\\d{1,2}$")) && node.bounds.top < 900 && node.bounds.right > 500)
+                }
+                .take(8)
+                .toList()
+            for (key in keys) {
+                builder.append(" || ").append(key.text)
+                    .append('[').append(key.bounds.left).append(',').append(key.bounds.top).append(']')
+                    .append(if (key.clickable) "C" else "-")
+                    .append(if (key.visible) "V" else "H")
+            }
+            builder.append('\n')
+            file.appendText(builder.toString())
+        }
+    }
+
+    private fun dumpTreeForDebug(pkg: String, rootPackage: String, nodes: List<NodeSnapshot>) {        if (!BuildConfig.DEBUG) return
+        val key = pkg + "/" + rootPackage
+        val now = System.currentTimeMillis()
+        if (key == lastDumpKey && now - lastDumpAt < 1000L) return
+        lastDumpKey = key
+        lastDumpAt = now
+        runCatching {
+            val dir = getExternalFilesDir(null) ?: return@runCatching
+            val file = File(dir, "tree_$now.txt")
+            val metrics = resources.displayMetrics
+            val builder = StringBuilder(nodes.size * 96)
+            builder.append("pkg=").append(pkg)
+                .append(" rootPkg=").append(rootPackage)
+                .append(" time=").append(now)
+                .append(" screen=").append(metrics.widthPixels).append('x').append(metrics.heightPixels)
+                .append(" nodes=").append(nodes.size)
+                .append('\n')
+            for (node in nodes) {
+                builder.append(node.index).append('|')
+                    .append(node.depth).append('|')
+                    .append(node.className.substringAfterLast('.')).append('|')
+                    .append(node.text.replace('\n', ' ')).append('|')
+                    .append(node.contentDescription.replace('\n', ' ')).append('|')
+                    .append(node.viewId.substringAfterLast('/')).append('|')
+                    .append(node.bounds.left).append(',').append(node.bounds.top).append(',')
+                    .append(node.bounds.right).append(',').append(node.bounds.bottom).append('|')
+                    .append(if (node.clickable) "click" else "-").append('|')
+                    .append(if (node.visible) "vis" else "invis").append('\n')
+            }
+            file.writeText(builder.toString())
+        }
+    }
+
+    private fun AccessibilityNodeInfo.boundsKey(): String {
+        val rect = Rect()
+        getBoundsInScreen(rect)
+        return "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+    }
+
+    companion object {
+        private const val FAST_DELAY_MS = 0L
+        private const val SLOW_DELAY_MS = 40L
+        private const val SAME_TARGET_WINDOW_MS = 1200L
+        private const val MAX_PARENT_SEARCH = 8
+        private const val GESTURE_DURATION_MS = 40L
+        private const val REWARD_WAIT_MS = 90_000L
+        private const val REWARD_EXIT_COOLDOWN_MS = 5_000L
+        private const val PROMPT_COOLDOWN_MS = 30_000L
+        private const val PROMPT_TIMEOUT_MS = 45_000L
+        private const val LAUNCH_WINDOW_MS = 6_000L
+        private const val OCR_POLL_MS = 500L
+        private const val DOUYIN_PACKAGE = "com.ss.android.ugc.aweme"
+
+        /**
+         * System surfaces that sometimes float above the current app and would
+         * be mistaken for an ad. Covers the side bars / game overlays of the
+         * major Chinese vendors plus AOSP.
+         */
+        private val SYSTEM_PACKAGE_PREFIXES = listOf(
+            "com.android.systemui",
+            "com.android.settings",
+            "com.android.packageinstaller",
+            "com.android.permissioncontroller",
+            "com.android.shell",
+            "com.android.providers",
+            "com.vivo.card",
+            "com.vivo.smartshot",
+            "com.vivo.upslide",
+            "com.vivo.timerwidget",
+            "com.vivo.gamecube",
+            "com.vivo.frameworkui",
+            "com.vivo.assistant",
+            "com.vivo.vtouch",
+            "com.vivo.screenrecorder",
+            "com.vivo.dream",
+            "com.vivo.abe",
+            "com.iqoo.card",
+            "com.miui.contentextension",
+            "com.miui.securitycenter",
+            "com.miui.freeform",
+            "com.miui.notification",
+            "com.miui.packageinstaller",
+            "com.miui.powerkeeper",
+            "com.coloros.safecenter",
+            "com.coloros.smartsidebar",
+            "com.coloros.notificationmanager",
+            "com.coloros.assistantscreen",
+            "com.oplus.safecenter",
+            "com.oplus.gameassist",
+            "com.huawei.systemmanager",
+            "com.huawei.gameassistant",
+            "com.hihonor.gameassistant",
+            "com.sec.android.app.cocktailbarservice",
+        )
+
+        /**
+         * Vendor-agnostic keywords for system UI surfaces. Deliberately avoids
+         * media/app names, so "小米视频" or "网易云音乐" ads are still skipped.
+         */
+        private val SYSTEM_PACKAGE_KEYWORDS = listOf(
+            "systemui",
+            "launcher",
+            "inputmethod",
+            "input_method",
+            "keyboard",
+            ".ime",
+            "packageinstaller",
+            "permissioncontroller",
+            "gameassistant",
+            "gamebooster",
+            "gamespace",
+            "gamecube",
+            "gameassist",
+            "sidebar",
+            "assistantscreen",
+            "cockpit",
+            "sidepanel",
+            "freeform",
+            "multiwindow",
+            "smartshot",
+            "screenrecorder",
+            "upslide",
+            "timerwidget",
+            "frameworkui",
+            "notificationmanager",
+            "powerkeeper",
+            "systemmanager",
+            "contentextension",
+            "cocktailbarservice",
+            "cornerhubble",
+        )
+
+        const val ACTION_PAUSE_CHANGED = "hey.skipad.action.PAUSE_CHANGED"
+        const val ACTION_TOGGLE_PAUSE = "hey.skipad.action.TOGGLE_PAUSE"
+
+        private val _running = MutableStateFlow(false)
+        val running: StateFlow<Boolean> = _running.asStateFlow()
+
+        @Volatile
+        var instance: AdSkipService? = null
+            private set
+    }
+}

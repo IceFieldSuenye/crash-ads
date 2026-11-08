@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">闪退广告</string>
+    <string name="accessibility_service_label">闪退广告</string>
+    <string name="accessibility_service_summary">自动识别并跳过开屏 / 插屏广告</string>
+    <string name="accessibility_service_description">开启后，闪退广告 会读取当前界面的控件文字与结构，识别「跳过 / 关闭广告 / 倒计时」等元素并自动点击。\n\n本服务不会读取、保存或上传任何个人信息，所有判断都在设备本地完成，你可以随时在系统设置中关闭它。</string>
+
+    <string name="nav_overview">概览</string>
+    <string name="nav_rules">规则</string>
+    <string name="nav_logs">日志</string>
+
+    <string name="status_running">运行中</string>
+    <string name="status_off">未开启</string>
+    <string name="enable_service">开启无障碍服务</string>
+    <string name="open_settings">去开启</string>
+    <string name="service_hint">闪退广告 依赖系统的无障碍权限来识别广告按钮。请在弹出的系统设置中找到「闪退广告」并开启。</string>
+
+    <string name="stat_today">今日跳过</string>
+    <string name="stat_total">累计跳过</string>
+    <string name="stat_runtime">运行状态</string>
+
+    <string name="recent_hits">最近命中</string>
+    <string name="recent_empty">还没有命中记录，去打开有开屏广告的应用试试。</string>
+
+    <string name="rule_master">自动跳过</string>
+    <string name="rule_master_desc">总开关，关闭后不再识别与点击</string>
+    <string name="rule_countdown">倒计时识别</string>
+    <string name="rule_countdown_desc">识别右上角的「5s / 5 秒 / 数字」倒计时并点击</string>
+    <string name="rule_viewid">控件 ID 识别</string>
+    <string name="rule_viewid_desc">通过 skip_button、ad_close 等资源 ID 定位按钮</string>
+    <string name="rule_content_desc">描述文本识别</string>
+    <string name="rule_content_desc_desc">匹配控件 contentDescription 中的跳过类描述</string>
+    <string name="rule_gesture">手势兜底</string>
+    <string name="rule_gesture_desc">节点不可点击时，按坐标模拟点按</string>
+    <string name="rule_aggressive">激进模式</string>
+    <string name="rule_aggressive_desc">放宽「关闭 / ×」类文案的判定，命中率更高但可能误触</string>
+    <string name="rule_toast">点击提示</string>
+    <string name="rule_toast_desc">每次成功跳过后轻提示一次</string>
+
+    <string name="rule_cooldown">点击冷却</string>
+    <string name="rule_cooldown_desc">两次自动点击之间的最小间隔，避免误触与连点</string>
+    <string name="rule_blacklist">应用黑名单</string>
+    <string name="rule_blacklist_desc">这些应用内的界面不会被处理</string>
+    <string name="rule_blacklist_add">添加包名</string>
+    <string name="rule_blacklist_empty">暂无黑名单应用</string>
+    <string name="rule_blacklist_placeholder">例如 com.example.app</string>
+
+    <string name="rule_test">规则测试</string>
+    <string name="rule_test_desc">输入一段控件文字，检查它会命中哪条规则</string>
+    <string name="rule_test_placeholder">例如：跳过 5s</string>
+    <string name="rule_test_hit">命中</string>
+    <string name="rule_test_miss">未命中</string>
+
+    <string name="logs_empty">暂无日志。\n开启服务后，每次识别与点击都会记录在这里。</string>
+    <string name="logs_clear">清空日志</string>
+    <string name="logs_count">共 %1$d 条</string>
+
+    <string name="privacy_title">隐私与离线</string>
+    <string name="privacy_body">本应用不申请 INTERNET 权限，全程离线运行，不联网、不上传任何数据。所有识别与点击均在本机完成，无障碍服务仅读取当前窗口的控件文字与结构，用于判断「跳过」按钮。</string>
+
+    <string name="about_title">关于</string>
+    <string name="about_body">闪退广告 是一款利用无障碍服务的开屏 / 插屏广告跳过工具，通用启发式识别，无需 Root。</string>
+
+    <string name="battery_title">后台保活</string>
+    <string name="battery_desc">允许后台运行并关闭电池优化，避免系统在后台冻结无障碍服务</string>
+    <string name="battery_action">开启电池白名单</string>
+    <string name="battery_ok">已加入电池白名单</string>
+    <string name="battery_oem_action">后台运行设置</string>
+    <string name="battery_oem_hint">部分系统还需在「自启动 / 后台运行管理」中允许本应用</string>
+
+    <string name="nav_about">关于</string>
+
+    <string name="about_ai_title">AI 生成提示</string>
+    <string name="about_ai_body">本应用的界面、业务代码与文档由 AI 编码智能体（DeepSeek Harness）生成，经人工配置与构建。AI 生成的代码可能存在缺陷或安全隐患，请在充分评估后使用；作者不对因使用本应用造成的任何损失负责。</string>
+    <string name="about_oss_title">开源组件与许可证</string>
+    <string name="about_oss_body">本应用使用以下开源组件，均以 Apache License 2.0 授权。完整许可证全文见下方「查看 Apache-2.0 全文」，或项目根目录的 LICENSE 文件。</string>
+    <string name="about_license_title">本应用许可</string>
+    <string name="about_license_body">本项目源码以 Apache License 2.0 发布，详见项目根目录 LICENSE。应用图标由用户提供，其权利归用户所有。</string>
+    <string name="about_view_license">查看 Apache-2.0 全文</string>
+    <string name="about_license_dialog_title">Apache License 2.0</string>
+    <string name="action_close">关闭</string>
+</resources>

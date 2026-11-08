@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+.gradle-home/
+.kotlin/
+build/
+app/build/
+.tools/
+.tmp/
+
+# Local machine configuration
+local.properties
+
+# Signing material — never commit private keys
+*.jks
+*.keystore
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Local test artifacts and helper scripts (never shipped)
+Pre-Delete/
+*.py
