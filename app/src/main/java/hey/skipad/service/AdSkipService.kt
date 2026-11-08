@@ -440,6 +440,19 @@ class AdSkipService : AccessibilityService() {
                     return
                 }
             }
+            // Most ads swallow the back key, so try an on-screen close
+            // affordance before falling back to BACK.
+            val onScreen = AdDetector.findAnyCornerClose(tree.nodes, width, height)
+                ?: AdDetector.findSkipButton(tree.nodes)
+            val onScreenNode = onScreen?.let { tree.refs.getOrNull(it.nodeIndex) }
+            if (onScreenNode != null && performSkip(onScreenNode) != SkipOutcome.FAILED) {
+                lastClickAt = SystemClock.elapsedRealtime()
+                forceQuitUntil = 0L
+                forceQuitAttempts = 0
+                LogStore.add(pkg, onScreen?.label ?: "关闭按钮", "屏幕关闭", SkipOutcome.CLICKED)
+                return
+            }
+
             val quitAt = SystemClock.elapsedRealtime()
             if (forceQuitAttempts < 3 && quitAt - lastForceQuitAt > 1200L) {
                 lastForceQuitAt = quitAt

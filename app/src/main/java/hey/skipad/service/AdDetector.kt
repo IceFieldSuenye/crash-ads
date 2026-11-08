@@ -404,18 +404,27 @@ object AdDetector {
     }
 
     /**
-     * Two-step feed-ad flow (e.g. QQ Zone): first tap the small "广告" label,
-     * then the sheet offers "关闭此条广告". This finds the second-step entry.
+     * Two-step feed-ad flow (QQ Zone / QQ channels): first tap the small "广告"
+     * label, then the sheet offers "关闭此条广告". This finds the second step.
+     *
+     * The explicit wording is trusted on its own: after the sheet opens the
+     * original ad label is gone, so requiring ad context made the second tap
+     * unreachable and the ad impossible to close.
      */
     fun findCloseThisAd(nodes: List<NodeSnapshot>): SkipCandidate? {
-        // A feed-ad sheet only exists on top of an ad surface. Without this
-        // guard, every app's own "不感兴趣 / 关闭" menu would match.
-        if (!hasAdLabel(nodes) && !hasStrongAdContext(nodes)) return null
+        val adContext = hasAdLabel(nodes) || hasStrongAdContext(nodes)
         for (node in nodes) {
             if (!node.enabled) continue
             val text = normalize(node.text)
-            if (text.isEmpty()) continue
-            if (!closeThisAdPattern.containsMatchIn(text)) continue
+            if (text.isEmpty() || text.length > 14) continue
+            val explicit = text == "关闭此条广告" || text == "关闭该条广告" ||
+                text == "关闭本条广告" || text == "屏蔽此条广告" ||
+                text == "屏蔽该条广告" || text == "关闭此广告" ||
+                text == "关闭广告"
+            // "不感兴趣" only counts on a real ad surface; it is also the
+            // label of every feed app's own overflow menu.
+            val interest = text == "不感兴趣" && adContext
+            if (!explicit && !interest) continue
             val clickable = node.clickable || ancestorClickable(nodes, node)
             if (!clickable) continue
             return SkipCandidate(node.index, 100, "关闭此条广告", node.text.trim().take(24))
