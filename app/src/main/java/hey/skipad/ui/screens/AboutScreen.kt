@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -89,6 +90,7 @@ fun AboutScreen() {
         }
 
         item { AppInfoCard() }
+        item { FeedbackCard() }
         item { AiNoticeCard() }
         item { OpenSourceCard(onViewLicense = { showLicense = true }) }
         item { ProjectLicenseCard() }
@@ -176,6 +178,32 @@ private fun AppInfoCard() {
         InfoLine("核心能力", "无障碍服务（AccessibilityService）")
         InfoLine("网络", "不申请 INTERNET 权限 · 完全离线")
         InfoLine("权限", "无障碍、忽略电池优化、悬浮窗、通知")
+    }
+}
+
+@Composable
+private fun FeedbackCard() {
+    val uriHandler = LocalUriHandler.current
+    val repoUrl = "https://github.com/IceFieldSuenye/crash-ads"
+    SectionCard {
+        Text("问题反馈", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "遇到误拦截、漏拦截、崩溃或想要新功能，欢迎在 GitHub 提交 issue。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(10.dp))
+        TextButton(
+            onClick = { runCatching { uriHandler.openUri("$repoUrl/issues") } },
+        ) {
+            Text("$repoUrl/issues", color = MaterialTheme.colorScheme.primary)
+        }
+        TextButton(
+            onClick = { runCatching { uriHandler.openUri(repoUrl) } },
+        ) {
+            Text("项目主页：$repoUrl", color = MaterialTheme.colorScheme.primary)
+        }
     }
 }
 
