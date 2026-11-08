@@ -359,13 +359,15 @@ class AdSkipService : AccessibilityService() {
         if (isSystemPackage(rootPackage)) return
 
         val (width, height) = screenSize()
+        val inLaunchWindow = SystemClock.elapsedRealtime() <= launchWindowUntil
 
         // "仅开屏跳过": only the short window right after an app comes forward.
-        if (settings.splashOnly && SystemClock.elapsedRealtime() > launchWindowUntil) return
+        if (settings.splashOnly && !inLaunchWindow) return
 
-        // Full-screen H5 ads can be excluded: some apps open their own WebView
-        // content and skipping it would close real pages.
-        if (!settings.skipFullscreenWebAds &&
+        // "保留全屏网页广告" never applies to the launch window: a splash ad is
+        // an ad even when it is an H5 page. It only protects full-screen H5
+        // content shown later (rewarded videos, in-app pages).
+        if (!settings.skipFullscreenWebAds && !inLaunchWindow &&
             AdDetector.isFullscreenWebAd(tree.nodes, width, height)
         ) {
             return
@@ -1139,7 +1141,7 @@ class AdSkipService : AccessibilityService() {
         private const val REWARD_EXIT_COOLDOWN_MS = 5_000L
         private const val PROMPT_COOLDOWN_MS = 30_000L
         private const val PROMPT_TIMEOUT_MS = 45_000L
-        private const val LAUNCH_WINDOW_MS = 6_000L
+        private const val LAUNCH_WINDOW_MS = 10_000L
         private const val OCR_POLL_MS = 500L
         private const val DOUYIN_PACKAGE = "com.ss.android.ugc.aweme"
 

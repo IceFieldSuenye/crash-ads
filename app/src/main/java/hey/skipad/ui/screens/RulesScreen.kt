@@ -122,6 +122,7 @@ fun RulesScreen(
                     description = "关闭界面内带「广告」标识的小弹窗 / 悬浮广告",
                     checked = settings.closePopups,
                     onCheckedChange = onToggleClosePopups,
+                    enabled = !settings.splashOnly,
                 )
                 SwitchRow(
                     title = "图片识别（OCR）",
@@ -146,18 +147,24 @@ fun RulesScreen(
                     description = "抖音等平台刷到广告视频时自动滑走",
                     checked = settings.autoSwipeFeed,
                     onCheckedChange = onToggleAutoSwipe,
+                    enabled = !settings.splashOnly,
                 )
                 SwitchRow(
                     title = "仅开屏跳过广告",
-                    description = "只处理应用启动那几秒的开屏 / 插屏广告，其他界面一律不动",
+                    description = "只处理应用启动那几秒的开屏 / 插屏广告，其他界面一律不动；开启后下方与开屏无关的开关会失效",
                     checked = settings.splashOnly,
                     onCheckedChange = onToggleSplashOnly,
                 )
                 SwitchRow(
                     title = "保留全屏网页广告",
-                    description = "全屏 WebView / H5 广告大多是激励视频，保留下不自动跳过；关闭后一律跳过",
+                    description = if (settings.splashOnly) {
+                        "「仅开屏跳过」开启时此项固定为关闭：开屏广告本身就是网页也会被跳过"
+                    } else {
+                        "全屏 WebView / H5 广告大多是激励视频，保留下不自动跳过；关闭后一律跳过"
+                    },
                     checked = !settings.skipFullscreenWebAds,
                     onCheckedChange = { onToggleFullscreenWebAds(!it) },
+                    enabled = !settings.splashOnly,
                 )
             }
         }
