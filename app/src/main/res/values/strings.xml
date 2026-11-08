@@ -75,7 +75,7 @@
     <string name="about_oss_title">开源组件与许可证</string>
     <string name="about_oss_body">本应用使用以下开源组件，均以 Apache License 2.0 授权。完整许可证全文见下方「查看 Apache-2.0 全文」，或项目根目录的 LICENSE 文件。</string>
     <string name="about_license_title">本应用许可</string>
-    <string name="about_license_body">本项目源码以 Apache License 2.0 发布，详见项目根目录 LICENSE。应用图标由用户提供，其权利归用户所有。</string>
+    <string name="about_license_body">本项目源码以 Apache License 2.0 发布，详见项目根目录 LICENSE。</string>
     <string name="about_view_license">查看 Apache-2.0 全文</string>
     <string name="about_license_dialog_title">Apache License 2.0</string>
     <string name="action_close">关闭</string>

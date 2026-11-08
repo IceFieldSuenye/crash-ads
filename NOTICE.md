@@ -22,6 +22,10 @@
 
 > 上述组件均通过 Google Maven / Maven Central 分发，构建时由 Gradle 自动下载，不随源码仓库附带。
 
-## 3. 应用图标
+## 3. 机器学习组件
 
-应用图标由用户提供的 `image.ico` 转换而来（圆角化、多尺寸重绘）。其权利归用户所有，不在本项目 Apache-2.0 授权范围内。
+| 组件 | 版本 | 许可证 | 项目地址 |
+| --- | --- | --- | --- |
+| ML Kit Text Recognition (Chinese) | 16.0.1 | Google ML Kit Terms of Service | https://developers.google.com/ml-kit/terms |
+
+> OCR 识别完全在设备本地运行，模型随应用打包，不上传任何图片或文本。
