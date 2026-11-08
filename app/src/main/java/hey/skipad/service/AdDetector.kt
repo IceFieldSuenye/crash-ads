@@ -526,22 +526,20 @@ object AdDetector {
             val matched = text.contains("确认放弃") || text.contains("确定放弃") ||
                 text.contains("确认离开") || (text == "放弃" && nodes.size < 60)
             if (!matched) continue
-            val clickable = node.clickable || ancestorClickable(nodes, node)
-            if (!clickable) continue
+            if (node.bounds.width() <= 0 || node.bounds.height() <= 0) continue
             return SkipCandidate(node.index, 100, "确认放弃提前领奖", node.text.trim().take(24))
         }
         return null
     }
 
-    /** Any visible, clickable "跳过" control (used to abandon an ad outright). */
+    /** Any visible "跳过" control (used to abandon an ad outright). */
     fun findSkipButton(nodes: List<NodeSnapshot>): SkipCandidate? {
         for (node in nodes) {
             if (!node.enabled) continue
             val text = normalize(node.text)
             if (text.isEmpty() || text.length > 12) continue
             if (!skipPhrasePattern.containsMatchIn(text)) continue
-            val clickable = node.clickable || ancestorClickable(nodes, node)
-            if (!clickable) continue
+            if (node.bounds.width() <= 0 || node.bounds.height() <= 0) continue
             return SkipCandidate(node.index, 100, "跳过", node.text.trim().take(24))
         }
         return null
@@ -549,7 +547,8 @@ object AdDetector {
 
     /**
      * "继续看视频" on the promo sheet of a rewarded video: tapping it closes the
-     * sheet and playback continues, so the reward still lands.
+     * sheet and playback continues, so the reward still lands. WebView links do
+     * not always report clickable, so the coordinate tap is always attempted.
      */
     fun findContinueWatching(nodes: List<NodeSnapshot>): SkipCandidate? {
         for (node in nodes) {
@@ -557,8 +556,7 @@ object AdDetector {
             val text = normalize(node.text)
             if (text.isEmpty() || text.length > 12) continue
             if (resumeWords.none { text.contains(it) }) continue
-            val clickable = node.clickable || ancestorClickable(nodes, node)
-            if (!clickable) continue
+            if (node.bounds.width() <= 0 || node.bounds.height() <= 0) continue
             return SkipCandidate(node.index, 90, "继续观看", node.text.trim().take(24))
         }
         return null
@@ -709,9 +707,10 @@ object AdDetector {
     }
 
     /**
-     * A skip label only counts when it is a real, compact, clickable control.
-     * Text fields, menu rows and long paragraphs that merely contain the word
-     * "跳过" are ignored, which is what caused spurious taps in the past.
+     * A skip label only counts when it is a real, compact control.
+     * WebView-rendered links often report `clickable=false` even though they are
+     * perfectly tappable, so a small label is allowed to fall back to a
+     * coordinate tap instead of being rejected.
      */
     private fun skipTextAllowed(
         node: NodeSnapshot,
@@ -722,7 +721,9 @@ object AdDetector {
         nodes: List<NodeSnapshot>,
     ): Boolean {
         val clickable = node.clickable || ancestorClickable(nodes, node)
-        if (!clickable && !config.aggressive) return false
+        val compact = node.bounds.width() < screenWidth * 0.32f &&
+            node.bounds.height() < screenHeight * 0.09f
+        if (!clickable && !compact && !config.aggressive) return false
         if (node.bounds.width() > screenWidth * 0.5f) return false
         if (node.bounds.height() > screenHeight * 0.25f) return false
         if (node.bounds.top > screenHeight * 0.94f) return false
@@ -802,10 +803,15 @@ object AdDetector {
             bounds.width() < screenWidth * 0.42f
     }
 
+    /**
+     * Right-side corner of an ad window. The left corner is deliberately
+     * excluded: browsers put their shield / back / menu controls there, and a
+     * "关闭" label found on the left is almost never an ad close button.
+     */
     private fun isCorner(node: NodeSnapshot, screenWidth: Int, screenHeight: Int): Boolean {
         val bounds = node.bounds
         if (bounds.width() > screenWidth * 0.3f || bounds.height() > screenHeight * 0.18f) return false
-        val horizontal = bounds.left < screenWidth * 0.28f || bounds.right > screenWidth * 0.72f
+        val horizontal = bounds.right > screenWidth * 0.72f
         val vertical = bounds.top < screenHeight * 0.3f || bounds.bottom > screenHeight * 0.7f
         return horizontal && vertical
     }

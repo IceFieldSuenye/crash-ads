@@ -280,18 +280,6 @@ class AdSkipService : AccessibilityService() {
         }
     }.getOrDefault(false)
 
-    /**
-     * A system surface (vivo side bar, screenshot bar, game overlay...) owns the
-     * focused window. Taps aimed at the app underneath would land on it.
-     */
-    private fun isSystemWindowOnTop(): Boolean = runCatching {
-        windows.any { window ->
-            val focused = window.isActive || window.isFocused
-            if (!focused) return@any false
-            isSystemPackage(window.root?.packageName?.toString().orEmpty())
-        }
-    }.getOrDefault(false)
-
     private fun processWindow(pkg: String) {
         runCatching { doProcessWindow(pkg) }
             .onFailure { error ->
@@ -320,8 +308,6 @@ class AdSkipService : AccessibilityService() {
 
         // Soft keyboard on screen: never inspect or tap the tree underneath.
         if (isImeWindowActive()) return
-        // Vendor side bar / system overlay owns the focus: leave it alone.
-        if (isSystemWindowOnTop()) return
 
         val root = rootInActiveWindow ?: return
         val rootPackage = root.packageName?.toString().orEmpty()
@@ -330,10 +316,6 @@ class AdSkipService : AccessibilityService() {
 
         if (rootPackage.isNotEmpty() && rootPackage != pkg) return
         if (isSystemPackage(rootPackage)) return
-
-        // Any screen with a text field is an input surface (chat box, search,
-        // keyboard toolbar). Its "退 / 关闭 / 取消" controls are never ads.
-        if (tree.nodes.any { it.className.contains("EditText") }) return
 
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
@@ -800,16 +782,9 @@ class AdSkipService : AccessibilityService() {
             return SkipOutcome.CLICKED
         }
 
-        var parent = node.parent
-        var depth = 0
-        while (parent != null && depth < MAX_PARENT_SEARCH) {
-            if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                return SkipOutcome.CLICKED
-            }
-            parent = parent.parent
-            depth++
-        }
-
+        // Non-clickable nodes (WebView links, custom-drawn buttons) must be
+        // tapped by coordinate: clicking an ancestor container often reports
+        // success without ever triggering the link.
         if (settings.gestureFallback) {
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
@@ -824,6 +799,16 @@ class AdSkipService : AccessibilityService() {
                     return SkipOutcome.GESTURE
                 }
             }
+        }
+
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < MAX_PARENT_SEARCH) {
+            if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return SkipOutcome.CLICKED
+            }
+            parent = parent.parent
+            depth++
         }
         return SkipOutcome.FAILED
     }
