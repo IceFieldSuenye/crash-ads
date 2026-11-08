@@ -56,6 +56,19 @@ object StatsRepository {
         }
     }
 
+    /**
+     * Clears both counters. Called when the user wipes the log: leaving the
+     * "今日 / 累计" numbers behind made the counter look stuck.
+     */
+    suspend fun reset() {
+        val ctx = requireContext()
+        ctx.statsStore.edit { prefs ->
+            prefs[Keys.total] = 0
+            prefs[Keys.today] = 0
+            prefs[Keys.todayKey] = todayKey()
+        }
+    }
+
     private fun todayKey(): String =
         SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 }

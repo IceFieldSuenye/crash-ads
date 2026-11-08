@@ -287,8 +287,16 @@ object AdDetector {
      * here and "关闭广告" is rejected, because both forfeit the reward.
      *
      * The caller must only use this inside a rewarded-ad context.
+     *
+     * A close affordance pinned to a screen corner is NOT a popup close
+     * button: it is the ad's own "关闭" (top-right on most SDKs). Tapping it
+     * ended the rewarded video and produced the "暂未获得奖励" loop.
      */
-    fun findInterruptPopup(nodes: List<NodeSnapshot>): SkipCandidate? {
+    fun findInterruptPopup(
+        nodes: List<NodeSnapshot>,
+        screenWidth: Int,
+        screenHeight: Int,
+    ): SkipCandidate? {
         for (node in nodes) {
             if (!node.enabled) continue
             val raw = node.text.trim()
@@ -308,6 +316,7 @@ object AdDetector {
             val bounds = node.bounds
             if (bounds.width() < MIN_NODE_SIZE_PX || bounds.height() < MIN_NODE_SIZE_PX) continue
             if (bounds.width() > 720 || bounds.height() > 480) continue
+            if (isScreenCorner(bounds, screenWidth, screenHeight)) continue
             val clickable = node.clickable || ancestorClickable(nodes, node)
             if (!clickable) continue
             return SkipCandidate(node.index, 80, "奖励弹窗·关闭", raw.ifEmpty { "关闭" }.take(24))
@@ -606,13 +615,20 @@ object AdDetector {
      * sheet and playback continues, so the reward still lands. WebView links do
      * not always report clickable, so the coordinate tap is always attempted.
      */
-    fun findContinueWatching(nodes: List<NodeSnapshot>): SkipCandidate? {
+    fun findContinueWatching(
+        nodes: List<NodeSnapshot>,
+        screenHeight: Int = Int.MAX_VALUE,
+    ): SkipCandidate? {
         for (node in nodes) {
             if (!node.enabled) continue
             val text = normalize(node.text)
             if (text.isEmpty() || text.length > 12) continue
             if (resumeWords.none { text.contains(it) }) continue
-            if (node.bounds.width() <= 0 || node.bounds.height() <= 0) continue
+            val bounds = node.bounds
+            if (bounds.width() <= 0 || bounds.height() <= 0) continue
+            // Off-screen leftovers of a closed sheet must not be tapped: the
+            // coordinate tap would land on whatever is drawn at that spot.
+            if (bounds.top >= screenHeight || bounds.bottom <= 0) continue
             return SkipCandidate(node.index, 90, "继续观看", node.text.trim().take(24))
         }
         return null
@@ -870,6 +886,18 @@ object AdDetector {
         val horizontal = bounds.right > screenWidth * 0.72f
         val vertical = bounds.top < screenHeight * 0.3f || bounds.bottom > screenHeight * 0.7f
         return horizontal && vertical
+    }
+
+    /**
+     * A control glued to a screen edge (the ad's own close button). Popups
+     * that merely interrupt a video place their × inside the sheet, so an
+     * edge-pinned "关闭" must never be treated as a popup close.
+     */
+    private fun isScreenCorner(bounds: Rect, screenWidth: Int, screenHeight: Int): Boolean {
+        if (screenWidth <= 0 || screenHeight <= 0) return false
+        val nearEdgeX = bounds.right > screenWidth * 0.84f || bounds.left < screenWidth * 0.16f
+        val nearEdgeY = bounds.top < screenHeight * 0.13f || bounds.bottom > screenHeight * 0.87f
+        return nearEdgeX && nearEdgeY
     }
 
     /** Bottom-right quadrant of an interstitial/splash ad card (not necessarily the screen edge). */

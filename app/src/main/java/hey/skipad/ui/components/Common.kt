@@ -21,10 +21,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -33,6 +35,7 @@ import hey.skipad.data.SkipOutcome
 import hey.skipad.ui.theme.MintGreen
 import hey.skipad.ui.theme.OceanBlue
 import hey.skipad.ui.theme.SunsetOrange
+import hey.skipad.util.appLabel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -134,6 +137,8 @@ fun LogRow(
         SkipOutcome.FAILED -> SunsetOrange to "失败"
         SkipOutcome.BLOCKED -> SunsetOrange to "保护"
     }
+    val context = LocalContext.current
+    val appName = remember(entry.packageName) { appLabel(context, entry.packageName) }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -157,7 +162,7 @@ fun LogRow(
             )
             Spacer(Modifier.height(1.dp))
             Text(
-                text = "${entry.packageName} · ${entry.rule} · ${logTimeFormatter.format(Date(entry.timeMillis))}",
+                text = "$appName · ${entry.rule} · ${logTimeFormatter.format(Date(entry.timeMillis))}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

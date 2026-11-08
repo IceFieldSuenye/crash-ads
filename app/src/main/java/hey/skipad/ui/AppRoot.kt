@@ -113,7 +113,6 @@ fun AppRoot(vm: MainViewModel) {
             ) { index ->
                 when (index) {
                     TAB_OVERVIEW -> OverviewScreen(
-                        settings = settings,
                         stats = stats,
                         logs = logs,
                         running = running,
@@ -121,7 +120,6 @@ fun AppRoot(vm: MainViewModel) {
                         batteryIgnored = batteryIgnored,
                         paused = paused,
                         onOpenAccessibility = vm::openAccessibilitySettings,
-                        onToggleEnabled = vm::setEnabled,
                         onTogglePause = vm::setPaused,
                         onRequestBattery = vm::requestBatteryWhitelist,
                         onOpenOem = vm::openOemBackgroundSettings,

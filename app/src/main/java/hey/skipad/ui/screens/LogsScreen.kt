@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -35,6 +36,7 @@ import hey.skipad.data.SkipLogEntry
 import hey.skipad.data.SkipOutcome
 import hey.skipad.ui.components.LogRow
 import hey.skipad.ui.theme.SunsetOrange
+import hey.skipad.util.appLabel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -104,6 +106,8 @@ fun LogsScreen(
 
 @Composable
 private fun LogDetailDialog(entry: SkipLogEntry, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val appName = remember(entry.packageName) { appLabel(context, entry.packageName) }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -117,7 +121,8 @@ private fun LogDetailDialog(entry: SkipLogEntry, onDismiss: () -> Unit) {
                 )
                 Spacer(Modifier.height(14.dp))
                 DetailLine("时间", formatTime(entry.timeMillis))
-                DetailLine("应用", entry.packageName)
+                DetailLine("应用", appName)
+                DetailLine("包名", entry.packageName)
                 DetailLine("命中", entry.label)
                 DetailLine("规则", entry.rule)
                 DetailLine(

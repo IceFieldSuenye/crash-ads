@@ -61,6 +61,10 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     fun setPaused(value: Boolean) {
         PauseState.set(app, value)
         _paused.value = value
+        // The overview switch is now the single on/off control. Keep the legacy
+        // "enabled" flag in sync, otherwise an old paused state would silently
+        // block every scan even after the user turns skipping back on.
+        update { it.copy(enabled = !value) }
         NotificationHelper.notifyRunning(app)
     }
 
@@ -140,7 +144,12 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         update { it.copy(blacklist = it.blacklist - packageName) }
     }
 
-    fun clearLogs() = LogStore.clear()
+    fun clearLogs() {
+        LogStore.clear()
+        // The log page and the "今日 / 累计" counters describe the same history,
+        // so wiping one has to wipe the other.
+        viewModelScope.launch { StatsRepository.reset() }
+    }
 
     fun openAccessibilitySettings() = AccessibilityUtils.openAccessibilitySettings(app)
 

@@ -38,7 +38,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import hey.skipad.R
-import hey.skipad.data.AppSettings
 import hey.skipad.data.SkipLogEntry
 import hey.skipad.data.SkipStats
 import hey.skipad.ui.components.Dot
@@ -51,7 +50,6 @@ import hey.skipad.ui.theme.SunsetOrange
 
 @Composable
 fun OverviewScreen(
-    settings: AppSettings,
     stats: SkipStats,
     logs: List<SkipLogEntry>,
     running: Boolean,
@@ -59,7 +57,6 @@ fun OverviewScreen(
     batteryIgnored: Boolean,
     paused: Boolean,
     onOpenAccessibility: () -> Unit,
-    onToggleEnabled: (Boolean) -> Unit,
     onTogglePause: (Boolean) -> Unit,
     onRequestBattery: () -> Unit,
     onOpenOem: () -> Unit,
@@ -69,8 +66,7 @@ fun OverviewScreen(
         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { HeroCard(running, settings.enabled, onToggleEnabled) }
-        item { PauseCard(paused, running, onTogglePause) }
+        item { HeroCard(running = running, paused = paused, onToggle = onTogglePause) }
 
         if (!serviceEnabled || !running) {
             item {
@@ -117,44 +113,9 @@ fun OverviewScreen(
 }
 
 @Composable
-private fun PauseCard(
-    paused: Boolean,
-    running: Boolean,
-    onToggle: (Boolean) -> Unit,
-) {
-    SectionCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (paused) "已暂停拦截" else "自动拦截进行中",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (paused) SunsetOrange else MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = if (paused) {
-                        "所有应用都不会被自动跳过，重新打开开关立即恢复"
-                    } else {
-                        "临时关闭可暂停全部自动跳过，不必关掉无障碍服务"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Switch(
-                checked = !paused,
-                onCheckedChange = { onToggle(!it) },
-                enabled = running,
-            )
-        }
-    }
-}
-
-@Composable
 private fun HeroCard(
     running: Boolean,
-    enabled: Boolean,
+    paused: Boolean,
     onToggle: (Boolean) -> Unit,
 ) {
     Box(
@@ -208,7 +169,7 @@ private fun HeroCard(
                         )
                     }
                 }
-                HeroPill(running)
+                HeroPill(running = running, paused = paused)
             }
 
             Spacer(Modifier.height(20.dp))
@@ -216,19 +177,24 @@ private fun HeroCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = stringResource(R.string.rule_master),
+                        text = if (paused) "自动跳过已关闭" else "自动跳过",
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Text(
-                        text = stringResource(R.string.rule_master_desc),
+                        text = if (paused) {
+                            "已停止识别与点击，无障碍服务仍在运行，重新打开即可恢复"
+                        } else {
+                            "识别并跳过开屏、插屏与信息流广告，不改动无障碍权限"
+                        },
                         color = Color.White.copy(alpha = 0.8f),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
                 Switch(
-                    checked = enabled,
-                    onCheckedChange = onToggle,
+                    checked = !paused,
+                    onCheckedChange = { onToggle(!it) },
+                    enabled = running,
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = OceanBlue,
@@ -243,7 +209,17 @@ private fun HeroCard(
 }
 
 @Composable
-private fun HeroPill(running: Boolean) {
+private fun HeroPill(running: Boolean, paused: Boolean) {
+    val dotColor = when {
+        !running -> Color(0xFFFFD2C7)
+        paused -> Color(0xFFFFD98A)
+        else -> Color(0xFF8CFFD2)
+    }
+    val text = when {
+        !running -> stringResource(R.string.status_off)
+        paused -> "已暂停"
+        else -> stringResource(R.string.status_running)
+    }
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
@@ -255,11 +231,11 @@ private fun HeroPill(running: Boolean) {
             modifier = Modifier
                 .size(7.dp)
                 .clip(CircleShape)
-                .background(if (running) Color(0xFF8CFFD2) else Color(0xFFFFD2C7)),
+                .background(dotColor),
         )
         Spacer(Modifier.width(7.dp))
         Text(
-            text = stringResource(if (running) R.string.status_running else R.string.status_off),
+            text = text,
             color = Color.White,
             style = MaterialTheme.typography.labelMedium,
         )

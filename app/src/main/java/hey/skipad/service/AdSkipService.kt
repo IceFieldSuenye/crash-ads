@@ -340,18 +340,24 @@ class AdSkipService : AccessibilityService() {
 
         // 0) "暂未获得奖励 / 继续观看": an early close already cost the reward and
         //    the SDK offers a way back. Restore the countdown before anything
-        //    else runs, otherwise the close heuristics keep tapping 关闭.
+        //    else runs, then stop: falling through to the close heuristics is
+        //    exactly what produced the close → miss → resume loop.
         val miss = AdDetector.findRewardMissResume(tree.nodes)
         if (miss != null) {
             val missNode = tree.refs.getOrNull(miss.nodeIndex)
-            if (missNode != null && performSkip(missNode) != SkipOutcome.FAILED) {
-                lastClickAt = SystemClock.elapsedRealtime()
+            val missAt = SystemClock.elapsedRealtime()
+            if (missNode != null && missAt - lastContinueAt > 2_000L &&
+                performSkip(missNode) != SkipOutcome.FAILED
+            ) {
+                lastContinueAt = missAt
+                lastClickAt = missAt
                 forceQuitUntil = 0L
+                rewardContextPkg = pkg
                 rewardWaitPackage = pkg
-                rewardWaitSince = SystemClock.elapsedRealtime()
+                rewardWaitSince = missAt
                 LogStore.add(pkg, miss.label, "继续观看·恢复奖励", SkipOutcome.CLICKED)
-                return
             }
+            return
         }
 
         // 0b) "是否放弃提前领奖？" confirmation: it appears right after 继续看视频
@@ -373,26 +379,19 @@ class AdSkipService : AccessibilityService() {
         //    b) it only offers a forced detour ("browse 10s / play a game")
         //       with no way back → abandon the ad (跳过, else back out).
         if (AdDetector.isForcedBrowseAd(tree.nodes)) {
-            // A rewarded video is playing underneath: backing out forfeits the
-            // reward ("暂未获得奖励"). Stay on the ad and let it finish.
-            if (promise) {
-                logGuardOnce(pkg, "强制浏览广告", "奖励保护·不退出")
+            // The sheet usually offers a way back. Tap it first: it resumes the
+            // video and the reward still lands. Only when there is no way back
+            // do we fall through to abandoning the ad.
+            val resume = AdDetector.findContinueWatching(tree.nodes, height)
+            if (resume != null) {
+                clickContinueWatching(tree, resume, pkg, "继续观看")
                 return
             }
-            val resume = AdDetector.findContinueWatching(tree.nodes)
-            if (resume != null) {
-                val resumeNode = tree.refs.getOrNull(resume.nodeIndex)
-                val resumeAt = SystemClock.elapsedRealtime()
-                // The sheet is a WebView overlay: tapping the same link again
-                // before the SDK reacts would just pile up identical taps.
-                if (resumeNode != null && resumeAt - lastContinueAt > 1500L &&
-                    performSkip(resumeNode) != SkipOutcome.FAILED
-                ) {
-                    lastContinueAt = resumeAt
-                    lastClickAt = resumeAt
-                    forceQuitUntil = 0L
-                    LogStore.add(pkg, resume.label, "继续观看", SkipOutcome.CLICKED)
-                }
+            // A rewarded video is playing underneath: backing out forfeits the
+            // reward ("暂未获得奖励"). Stay on the ad and let it finish; the
+            // bare "继续观看" link it draws later is handled further down.
+            if (promise) {
+                logGuardOnce(pkg, "强制浏览广告", "奖励保护·不退出")
                 return
             }
 
@@ -478,7 +477,7 @@ class AdSkipService : AccessibilityService() {
         // 2) Popups that interrupt a rewarded video: close them (× / 关闭 /
         //    稍后 / 我知道了) so playback resumes and the reward still lands.
         if (inRewardContext) {
-            val popup = AdDetector.findInterruptPopup(tree.nodes)
+            val popup = AdDetector.findInterruptPopup(tree.nodes, width, height)
             if (popup != null && canDismissRewardPopup()) {
                 val node = tree.refs.getOrNull(popup.nodeIndex)
                 if (node != null && performSkip(node) != SkipOutcome.FAILED) {
@@ -505,6 +504,18 @@ class AdSkipService : AccessibilityService() {
         // 4) A rewarded video that is still playing cannot be skipped: tapping
         //    any close affordance here would forfeit the reward.
         if (unskippable) return
+
+        // 4b) A rewarded video that lost or paused its reward draws a bare
+        //     "继续观看" link outside the sheet. It is not part of the miss
+        //     dialog, so without this pass it would never be tapped and the ad
+        //     would sit there until the user did it by hand.
+        if (inRewardContext || promise) {
+            val resume = AdDetector.findContinueWatching(tree.nodes, height)
+            if (resume != null) {
+                clickContinueWatching(tree, resume, pkg, "继续观看·恢复播放")
+                return
+            }
+        }
 
         // 5) Reward gate: hold the skip while the reward is still pending.
         if (rewardGate(pkg, tree.nodes)) return
@@ -799,6 +810,31 @@ class AdSkipService : AccessibilityService() {
             }
         }
         return roots
+    }
+
+    /**
+     * Taps the "继续观看" affordance of a rewarded video. The link lives inside
+     * a WebView, so repeat taps are de-duplicated: pressing it again before the
+     * SDK reacts stacks identical taps and flips the ad back to "暂未获得奖励".
+     */
+    private fun clickContinueWatching(
+        tree: NodeTree,
+        candidate: SkipCandidate,
+        pkg: String,
+        rule: String,
+    ): Boolean {
+        val node = tree.refs.getOrNull(candidate.nodeIndex) ?: return false
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastContinueAt < 2_000L) return false
+        if (performSkip(node) == SkipOutcome.FAILED) return false
+        lastContinueAt = now
+        lastClickAt = now
+        forceQuitUntil = 0L
+        rewardContextPkg = pkg
+        rewardWaitPackage = pkg
+        rewardWaitSince = now
+        LogStore.add(pkg, candidate.label, rule, SkipOutcome.CLICKED)
+        return true
     }
 
     private fun clickCandidate(tree: NodeTree, candidate: SkipCandidate, pkg: String) {
