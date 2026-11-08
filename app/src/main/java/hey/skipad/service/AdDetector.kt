@@ -76,6 +76,20 @@ object AdDetector {
         "后获取奖励", "后领取奖励", "看广告领", "看视频领",
         "观看广告得", "观看得奖励", "看广告得奖励",
         "后可领奖", "后可獲得", "后可获得", "后可领取", "后可領取",
+        "可立即领奖", "立即领奖", "即可領獎", "即可领奖", "提前领奖",
+        "免看此广告", "免看廣告",
+    )
+
+    /**
+     * The "暂未获得奖励 / 继续观看" sheet: the ad was closed before its reward
+     * window ended. 继续观看 restores the countdown, so it must beat every
+     * close heuristic (see [findRewardMissResume]).
+     */
+    private val rewardMissWords = listOf(
+        "暂未获得奖励", "暫未獲得獎勵", "未获得奖励", "未獲得獎勵",
+        "暂无奖励", "暫無獎勵", "奖励未到账", "獎勵未到賬", "奖励未发放",
+        "未完成观看", "觀看未完成", "观看未完成", "观看时长不足",
+        "任务未完成", "任務未完成", "未达领奖条件",
     )
 
     /** Words that identify a "you are about to lose the reward" dialog. */
@@ -139,8 +153,13 @@ object AdDetector {
         RegexOption.IGNORE_CASE,
     )
 
+    /**
+     * "关闭此条广告" only. "不感兴趣" used to be part of this pattern, but it is
+     * also the label of every feed app's own overflow menu (Bilibili video
+     * cards, for one), so it closed ordinary content instead of an ad.
+     */
     private val closeThisAdPattern = Regex(
-        """关闭(此|该|这)条?广告|不感兴趣|屏蔽(此|该)广告|关闭广告""",
+        """关闭(此|该|这)条?广告|屏蔽(此|该)广告|关闭广告""",
     )
 
     private val resumeWords = listOf("继续观看", "继续播放", "继续欣赏", "继续看视频", "继续观看视频")
@@ -239,6 +258,29 @@ object AdDetector {
     }
 
     /**
+     * "暂未获得奖励 / 继续观看": the ad was closed before its reward window
+     * ended, and the SDK offers a way back. Tapping 继续观看 restores the
+     * countdown, so this must run before any close-icon heuristic.
+     */
+    fun findRewardMissResume(nodes: List<NodeSnapshot>): SkipCandidate? {
+        val miss = nodes.any { node ->
+            val text = normalize(node.text)
+            text.length in 1..40 && rewardMissWords.any { text.contains(it) }
+        }
+        if (!miss) return null
+
+        for (node in nodes) {
+            if (!node.enabled) continue
+            val text = normalize(node.text)
+            if (text.isEmpty() || text.length > 12) continue
+            if (resumeWords.none { text.contains(it) }) continue
+            if (node.bounds.width() <= 0 || node.bounds.height() <= 0) continue
+            return SkipCandidate(node.index, 110, "继续观看·恢复奖励", node.text.trim().take(24))
+        }
+        return null
+    }
+
+    /**
      * A popup that interrupts a rewarded video (download prompt, "打开应用",
      * survey sheet...). Closing it lets the video finish so the reward still
      * lands. Only explicit close affordances are used — "跳过" is never tapped
@@ -278,6 +320,9 @@ object AdDetector {
      * then the sheet offers "关闭此条广告". This finds the second-step entry.
      */
     fun findCloseThisAd(nodes: List<NodeSnapshot>): SkipCandidate? {
+        // A feed-ad sheet only exists on top of an ad surface. Without this
+        // guard, every app's own "不感兴趣 / 关闭" menu would match.
+        if (!hasAdLabel(nodes) && !hasStrongAdContext(nodes)) return null
         for (node in nodes) {
             if (!node.enabled) continue
             val text = normalize(node.text)
@@ -370,6 +415,7 @@ object AdDetector {
 
             val closeHit = if (
                 config.matchCloseIcon &&
+                !suppressCloseAd &&
                 strongContext &&
                 text.isBlank() &&
                 description.isBlank()
@@ -501,8 +547,18 @@ object AdDetector {
             text.length in 1..40 && forcedBrowseWords.any { text.contains(it) }
         }
         if (!hit) return false
+        // The sheet is usually a WebView layer, so SDK view ids and the small
+        // "广告" pill are often missing from the node tree. Reward wording on
+        // the same screen is enough context.
         if (hasStrongAdContext(nodes)) return true
-        return nodes.any { node -> normalize(node.text).contains("广告时长") }
+        return nodes.any { node ->
+            val text = normalize(node.text)
+            text.length <= 60 && (
+                text.contains("广告") || text.contains("廣告") ||
+                    text.contains("奖励") || text.contains("獎勵") ||
+                    text.contains("领奖") || text.contains("領獎")
+                )
+        }
     }
 
     /**

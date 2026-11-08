@@ -82,7 +82,7 @@ object SettingsRepository {
         gestureFallback = this[Keys.gesture] ?: true,
         aggressive = this[Keys.aggressive] ?: false,
         showToast = this[Keys.toast] ?: true,
-        cooldownMs = this[Keys.cooldown] ?: 400,
+        cooldownMs = this[Keys.cooldown] ?: 1200,
         blacklist = this[Keys.blacklist] ?: emptySet(),
         rewardMode = this[Keys.rewardMode]
             ?.let { raw -> RewardMode.entries.firstOrNull { it.name == raw } }

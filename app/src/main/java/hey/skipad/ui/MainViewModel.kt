@@ -93,7 +93,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun setCooldown(value: Int) {
-        update { it.copy(cooldownMs = value.coerceIn(200, 3000)) }
+        update { it.copy(cooldownMs = value.coerceIn(400, 3000)) }
     }
 
     fun setRewardMode(mode: RewardMode) {

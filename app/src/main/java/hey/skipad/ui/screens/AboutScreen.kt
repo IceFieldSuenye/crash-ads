@@ -1,5 +1,6 @@
 package hey.skipad.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +44,7 @@ import hey.skipad.R
 import hey.skipad.ui.components.SectionCard
 import hey.skipad.ui.theme.MintGreen
 import hey.skipad.ui.theme.OceanBlue
+import hey.skipad.ui.theme.SunsetOrange
 
 private data class OssEntry(val name: String, val version: String, val license: String)
 
@@ -89,6 +92,7 @@ fun AboutScreen() {
             }
         }
 
+        item { BetaNoticeCard() }
         item { AppInfoCard() }
         item { FeedbackCard() }
         item { AiNoticeCard() }
@@ -134,6 +138,47 @@ fun AboutScreen() {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun BetaNoticeCard() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = SunsetOrange.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, SunsetOrange.copy(alpha = 0.42f)),
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(SunsetOrange),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "测试版 · 可能存在 Bug",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = SunsetOrange,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "当前为公开测试版本，跳过规则、奖励保护与横屏适配仍在持续验证，" +
+                    "可能出现误跳、漏跳、点了没反应等情况。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "遇到问题请到下方「问题反馈」提交 GitHub Issue，附上日志页截图会更快定位。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

@@ -5,9 +5,11 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -51,7 +53,6 @@ class AdSkipService : AccessibilityService() {
     private var lastSignatureAt = 0L
 
     private var forceSkipOnce = false
-    private var bypassCooldownOnce = false
     private var rewardWaitPackage: String? = null
     private var rewardWaitSince = 0L
     private var lastPromptPackage: String? = null
@@ -74,6 +75,15 @@ class AdSkipService : AccessibilityService() {
 
     /** Hard cooldown: while active, no node is tapped at all. */
     private var suppressClickUntil = 0L
+
+    /**
+     * Anti machine-gun guard: the same rule on the same package may only fire
+     * a few times per window, so a page that ignores our tap cannot be spammed
+     * (Bilibili-style menus used to receive three taps in one second).
+     */
+    private val ruleTapHistory = HashMap<String, MutableList<Long>>()
+    private var lastRuleBlockAt = 0L
+    private var lastGuardLogAt = 0L
 
     /** Package currently showing a rewarded video (reward protection active). */
     private var rewardContextPkg: String? = null
@@ -109,7 +119,6 @@ class AdSkipService : AccessibilityService() {
     private val rescanRunnableA = Runnable { pendingPackage?.let(::processWindow) }
     private val rescanRunnableB = Runnable { pendingPackage?.let(::processWindow) }
     private val postClickScan = Runnable {
-        bypassCooldownOnce = true
         pendingPackage?.let(::processWindow)
     }
     private val promptTimeoutRunnable = Runnable {
@@ -302,9 +311,7 @@ class AdSkipService : AccessibilityService() {
 
         val now = SystemClock.elapsedRealtime()
         if (now < suppressClickUntil) return
-        val cooling = now - lastClickAt < settings.cooldownMs
-        if (cooling && !bypassCooldownOnce) return
-        bypassCooldownOnce = false
+        if (now - lastClickAt < settings.cooldownMs) return
 
         // Soft keyboard on screen: never inspect or tap the tree underneath.
         if (isImeWindowActive()) return
@@ -317,9 +324,7 @@ class AdSkipService : AccessibilityService() {
         if (rootPackage.isNotEmpty() && rootPackage != pkg) return
         if (isSystemPackage(rootPackage)) return
 
-        val metrics = resources.displayMetrics
-        val width = metrics.widthPixels
-        val height = metrics.heightPixels
+        val (width, height) = screenSize()
 
         val strongContext = AdDetector.hasStrongAdContext(tree.nodes)
         val promise = AdDetector.rewardPromise(tree.nodes)
@@ -333,7 +338,23 @@ class AdSkipService : AccessibilityService() {
         }
         val inRewardContext = rewardContextPkg == pkg
 
-        // 0) "是否放弃提前领奖？" confirmation: it appears right after 继续看视频
+        // 0) "暂未获得奖励 / 继续观看": an early close already cost the reward and
+        //    the SDK offers a way back. Restore the countdown before anything
+        //    else runs, otherwise the close heuristics keep tapping 关闭.
+        val miss = AdDetector.findRewardMissResume(tree.nodes)
+        if (miss != null) {
+            val missNode = tree.refs.getOrNull(miss.nodeIndex)
+            if (missNode != null && performSkip(missNode) != SkipOutcome.FAILED) {
+                lastClickAt = SystemClock.elapsedRealtime()
+                forceQuitUntil = 0L
+                rewardWaitPackage = pkg
+                rewardWaitSince = SystemClock.elapsedRealtime()
+                LogStore.add(pkg, miss.label, "继续观看·恢复奖励", SkipOutcome.CLICKED)
+                return
+            }
+        }
+
+        // 0b) "是否放弃提前领奖？" confirmation: it appears right after 继续看视频
         //    is tapped, and 确认放弃 is what actually resumes playback.
         val abandon = AdDetector.findEarlyRewardAbandon(tree.nodes)
         if (abandon != null) {
@@ -352,6 +373,12 @@ class AdSkipService : AccessibilityService() {
         //    b) it only offers a forced detour ("browse 10s / play a game")
         //       with no way back → abandon the ad (跳过, else back out).
         if (AdDetector.isForcedBrowseAd(tree.nodes)) {
+            // A rewarded video is playing underneath: backing out forfeits the
+            // reward ("暂未获得奖励"). Stay on the ad and let it finish.
+            if (promise) {
+                logGuardOnce(pkg, "强制浏览广告", "奖励保护·不退出")
+                return
+            }
             val resume = AdDetector.findContinueWatching(tree.nodes)
             if (resume != null) {
                 val resumeNode = tree.refs.getOrNull(resume.nodeIndex)
@@ -682,17 +709,55 @@ class AdSkipService : AccessibilityService() {
             rewardWaitPackage = pkg
             rewardWaitSince = SystemClock.elapsedRealtime()
         }
-        val waited = SystemClock.elapsedRealtime() - rewardWaitSince
 
         if (settings.rewardMode == RewardMode.ASK) {
-            if (!OverlayUtils.canDrawOverlays(this)) return waited < REWARD_WAIT_MS
-            if (rewardBall?.isShowing() != true && canPromptReward(pkg)) {
+            if (OverlayUtils.canDrawOverlays(this) &&
+                rewardBall?.isShowing() != true && canPromptReward(pkg)
+            ) {
                 showRewardBall(pkg)
             }
-            return waited < REWARD_WAIT_MS
         }
 
-        return waited < REWARD_WAIT_MS
+        // The reward is still pending: never close the ad, no matter how long
+        // it takes. The old 90 s cap released the click and produced exactly
+        // the "暂未获得奖励" screen. Users who want to give up can tap the
+        // floating prompt (ASK mode) or pause the service.
+        logGuardOnce(pkg, "奖励保护中", "等待奖励发放")
+        return true
+    }
+
+    /**
+     * Current display size in the right orientation. Accessibility services
+     * keep their Resources alive across rotations, so [android.util.DisplayMetrics]
+     * can still report portrait numbers while the game runs in landscape, which
+     * used to break every ratio-based ad heuristic.
+     */
+    private fun screenSize(): Pair<Int, Int> {
+        var width = resources.displayMetrics.widthPixels
+        var height = resources.displayMetrics.heightPixels
+        if (width <= 0 || height <= 0) {
+            width = 1080
+            height = 2400
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val manager = getSystemService(WindowManager::class.java)
+                val bounds = manager?.maximumWindowMetrics?.bounds
+                if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
+                    width = bounds.width()
+                    height = bounds.height()
+                }
+            }
+        }
+        return width to height
+    }
+
+    /** Rate-limited informational log so a guard cannot flood the log page. */
+    private fun logGuardOnce(pkg: String, label: String, rule: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastGuardLogAt < 8_000L) return
+        lastGuardLogAt = now
+        LogStore.add(pkg, label, rule, SkipOutcome.BLOCKED)
     }
 
     private fun activeTree(pkg: String): NodeTree? {
@@ -741,6 +806,7 @@ class AdSkipService : AccessibilityService() {
         val signature = pkg + "|" + candidate.rule + "|" + candidate.label + "|" + node.boundsKey()
         val now = SystemClock.elapsedRealtime()
         if (signature == lastSignature && now - lastSignatureAt < SAME_TARGET_WINDOW_MS) return
+        if (!ruleAllowed(pkg, candidate.rule)) return
 
         val outcome = performSkip(node)
         if (outcome == SkipOutcome.FAILED) return
@@ -748,14 +814,18 @@ class AdSkipService : AccessibilityService() {
         lastClickAt = now
         lastSignature = signature
         lastSignatureAt = now
+        // Hard cooldown after every successful tap: the window itself keeps
+        // firing content-change events, and re-scanning immediately used to
+        // produce three taps per second on pages that ignore them.
+        suppressClickUntil = now + settings.cooldownMs
 
         LogStore.add(pkg, candidate.label, candidate.rule, outcome)
         serviceScope.launch { StatsRepository.bump() }
 
-        // Re-check shortly after the tap: some splash ads ignore the first
+        // Re-check after the cooldown: some splash ads ignore the first
         // coordinate tap until their skip button becomes active.
         handler.removeCallbacks(postClickScan)
-        handler.postDelayed(postClickScan, 260L)
+        handler.postDelayed(postClickScan, settings.cooldownMs + 150L)
 
         if (settings.showToast) {
             showSkipToast(candidate.rule)
@@ -768,6 +838,33 @@ class AdSkipService : AccessibilityService() {
                 todayCount,
             )
         }
+    }
+
+    /**
+     * Anti machine-gun guard. A page that ignores our tap (or a UI that keeps
+     * matching the same rule) must not be clicked over and over: the same rule
+     * on the same package is limited to [RULE_MAX_TAPS] taps per
+     * [RULE_WINDOW_MS] window.
+     */
+    private fun ruleAllowed(pkg: String, rule: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (ruleTapHistory.size > 48) {
+            ruleTapHistory.entries.removeAll { (_, taps) ->
+                taps.isEmpty() || now - taps.last() > RULE_WINDOW_MS
+            }
+        }
+        val key = pkg + "|" + rule
+        val taps = ruleTapHistory.getOrPut(key) { ArrayList(4) }
+        taps.removeAll { now - it > RULE_WINDOW_MS }
+        if (taps.size >= RULE_MAX_TAPS) {
+            if (now - lastRuleBlockAt > 8_000L) {
+                lastRuleBlockAt = now
+                LogStore.add(pkg, rule, "冷却中 · 暂不重复点击", SkipOutcome.BLOCKED)
+            }
+            return false
+        }
+        taps.add(now)
+        return true
     }
 
     /** System Toast channel, pinned to the bottom of the screen. */
@@ -917,10 +1014,14 @@ class AdSkipService : AccessibilityService() {
     companion object {
         private const val FAST_DELAY_MS = 0L
         private const val SLOW_DELAY_MS = 40L
-        private const val SAME_TARGET_WINDOW_MS = 1200L
+        private const val SAME_TARGET_WINDOW_MS = 2500L
         private const val MAX_PARENT_SEARCH = 8
         private const val GESTURE_DURATION_MS = 40L
-        private const val REWARD_WAIT_MS = 90_000L
+
+        /** Same rule / same package: at most [RULE_MAX_TAPS] taps per window. */
+        private const val RULE_WINDOW_MS = 10_000L
+        private const val RULE_MAX_TAPS = 4
+
         private const val REWARD_EXIT_COOLDOWN_MS = 5_000L
         private const val PROMPT_COOLDOWN_MS = 30_000L
         private const val PROMPT_TIMEOUT_MS = 45_000L

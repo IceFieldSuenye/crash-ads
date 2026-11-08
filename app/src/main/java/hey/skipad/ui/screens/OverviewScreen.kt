@@ -190,11 +190,23 @@ private fun HeroCard(
                         color = Color.White,
                         style = MaterialTheme.typography.headlineMedium,
                     )
-                    Text(
-                        text = "无障碍 · 自动跳过开屏广告",
-                        color = Color.White.copy(alpha = 0.85f),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "无障碍 · 自动跳过开屏广告",
+                            color = Color.White.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "测试版",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Color.White.copy(alpha = 0.24f))
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                        )
+                    }
                 }
                 HeroPill(running)
             }

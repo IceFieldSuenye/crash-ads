@@ -24,7 +24,7 @@ data class AppSettings(
     val gestureFallback: Boolean = true,
     val aggressive: Boolean = false,
     val showToast: Boolean = true,
-    val cooldownMs: Int = 400,
+    val cooldownMs: Int = 1200,
     val blacklist: Set<String> = emptySet(),
     val rewardMode: RewardMode = RewardMode.ASK,
     val closePopups: Boolean = true,

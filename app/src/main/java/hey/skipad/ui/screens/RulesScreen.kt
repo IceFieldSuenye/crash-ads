@@ -203,7 +203,7 @@ private fun CooldownRow(value: Int, onChange: (Int) -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("点击冷却", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "两次自动点击之间的最小间隔",
+                    "两次自动点击之间的最小间隔，期间不会重复点击",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -218,8 +218,8 @@ private fun CooldownRow(value: Int, onChange: (Int) -> Unit) {
             value = local,
             onValueChange = { local = it },
             onValueChangeFinished = { onChange(local.toInt()) },
-            valueRange = 200f..3000f,
-            steps = 13,
+            valueRange = 400f..3000f,
+            steps = 12,
         )
     }
 }
